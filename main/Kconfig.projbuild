@@ -569,6 +569,9 @@ choice BOARD_TYPE
     config BOARD_TYPE_AI_VOX3
         bool "NULLLAB-AI-VOX3"
         depends on IDF_TARGET_ESP32S3
+    config BOARD_TYPE_AETHERTOYS_WIFI_CN
+        bool "AetherToys WiFi-CN (艾泽盒子)"
+        depends on IDF_TARGET_ESP32S3
 endchoice
 
 choice
