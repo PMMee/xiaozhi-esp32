@@ -28,6 +28,9 @@ public:
     virtual bool InputData(std::vector<int16_t>& data);
     virtual void Start();
 
+    // Raw audio write for music playback (streaming)
+    void WriteRaw(const int16_t* data, int samples) { Write(data, samples); }
+
     inline bool duplex() const { return duplex_; }
     inline bool input_reference() const { return input_reference_; }
     inline int input_sample_rate() const { return input_sample_rate_; }

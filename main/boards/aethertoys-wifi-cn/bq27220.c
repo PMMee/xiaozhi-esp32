@@ -7,6 +7,7 @@
 #include "freertos/task.h"
 #include "esp_log.h"
 #include "esp_check.h"
+#include <string.h>
 #include "bq27220.h"
 #include "bq27220_reg.h"
 #include "bq27220_data_memory.h"
@@ -39,11 +40,10 @@ static const char *TAG = "bq27220";
     }
 
 typedef struct {
-    i2c_master_bus_handle_t i2c_bus_handle;
-    uint8_t dev_addr;
+    i2c_master_dev_handle_t i2c_dev_handle;
 } bq27220_data_t;
 
-// ---- New I2C helper functions ----
+// ---- I2C helper functions (ESP-IDF v5.x device-handle API) ----
 
 static esp_err_t bq_i2c_write(bq27220_data_t *bq_data, uint8_t reg, const uint8_t *data, size_t len)
 {
@@ -52,12 +52,12 @@ static esp_err_t bq_i2c_write(bq27220_data_t *bq_data, uint8_t reg, const uint8_
     if (len > 0 && data != NULL) {
         memcpy(buf + 1, data, len);
     }
-    return i2c_master_transmit(bq_data->i2c_bus_handle, bq_data->dev_addr, buf, len + 1, -1);
+    return i2c_master_transmit(bq_data->i2c_dev_handle, buf, len + 1, -1);
 }
 
 static esp_err_t bq_i2c_read(bq27220_data_t *bq_data, uint8_t reg, uint8_t *data, size_t len)
 {
-    return i2c_master_transmit_receive(bq_data->i2c_bus_handle, bq_data->dev_addr, &reg, 1, data, len, -1);
+    return i2c_master_transmit_receive(bq_data->i2c_dev_handle, &reg, 1, data, len, -1);
 }
 
 // ----
@@ -216,12 +216,18 @@ bq27220_handle_t bq27220_create(const bq27220_config_t *config)
         ESP_LOGE(TAG, "Memory allocation failed");
         return NULL;
     }
-    handle->i2c_bus_handle = config->i2c_bus;
-    handle->dev_addr = BQ27220_I2C_ADDRESS;
+    // 先 probe 确认设备存在
+    esp_err_t probe_err = i2c_master_probe(config->i2c_bus, BQ27220_I2C_ADDRESS, -1);
+    ESP_GOTO_ON_FALSE(probe_err == ESP_OK, 0, err, TAG, "BQ27220 not found at 0x%02X", BQ27220_I2C_ADDRESS);
 
-    // Probe the device to verify it's on the bus
-    esp_err_t probe_err = i2c_master_probe(handle->i2c_bus_handle, handle->dev_addr, -1);
-    ESP_GOTO_ON_FALSE(probe_err == ESP_OK, 0, err, TAG, "BQ27220 not found at 0x%02X", handle->dev_addr);
+    // 创建设备句柄
+    i2c_device_config_t dev_cfg = {
+        .dev_addr_length = I2C_ADDR_BIT_LEN_7,
+        .device_address = BQ27220_I2C_ADDRESS,
+        .scl_speed_hz = 100000,
+    };
+    esp_err_t dev_err = i2c_master_bus_add_device(config->i2c_bus, &dev_cfg, &handle->i2c_dev_handle);
+    ESP_GOTO_ON_FALSE(dev_err == ESP_OK, 0, err, TAG, "i2c_master_bus_add_device failed");
 
     uint16_t data = getDeviceNumber(handle);
     ESP_GOTO_ON_FALSE(data == BQ27220_DEVICE_ID, 0, err, TAG, "Invalid Device Number %04x != 0x0220", data);
@@ -290,6 +296,9 @@ bq27220_handle_t bq27220_create(const bq27220_config_t *config)
     bq27220_seal(handle);
     return handle;
 err:
+    if (handle->i2c_dev_handle) {
+        i2c_master_bus_rm_device(handle->i2c_dev_handle);
+    }
     free(handle);
     return NULL;
 }
@@ -297,6 +306,10 @@ err:
 esp_err_t bq27220_delete(bq27220_handle_t bq_handle)
 {
     ESP_RETURN_ON_FALSE(bq_handle, ESP_ERR_INVALID_ARG, TAG, "Invalid handle");
+    bq27220_data_t *bq_data = (bq27220_data_t *)bq_handle;
+    if (bq_data->i2c_dev_handle) {
+        i2c_master_bus_rm_device(bq_data->i2c_dev_handle);
+    }
     free(bq_handle);
     return ESP_OK;
 }

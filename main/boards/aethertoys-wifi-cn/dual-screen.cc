@@ -3,9 +3,10 @@
 #include "codecs/box_audio_codec.h"
 #include "display/lcd_display.h"
 #include "application.h"
+#include "mcp_server.h"
 #include "button.h"
 #include "config.h"
-#include <esp_lcd_gc9d01.h>
+#include "esp_lcd_gc9d01.h"
 #include <esp_log.h>
 #include <driver/i2c_master.h>
 #include <driver/ledc.h>
@@ -21,6 +22,9 @@
 //电源
 #include "bq27220.h"
 #include <driver/temperature_sensor.h>
+
+// 音乐播放
+#include "esp32_music.h"
 
 //RGB灯
 #include "led/circular_strip.h"
@@ -179,6 +183,7 @@ private:
     bool idle_backlight_dimmed_ = false;
 
     bq27220_handle_t bq27220 = NULL;
+    Music* music_ = nullptr;
 
     void StopIdleBacklightTimer() {
         if (idle_backlight_timer_ == nullptr) {
@@ -364,7 +369,7 @@ private:
         mcp_server.AddTool("self.brightness.set",
             "Set backlight brightness (0-100)",
             PropertyList({
-                Property("value", kPropertyTypeNumber, std::to_string(0))
+                Property("value", kPropertyTypeInteger, 0)
             }),
             [this](const PropertyList& properties) -> ReturnValue {
                 int brightness = properties["value"].value<int>();
@@ -375,6 +380,63 @@ private:
                     ESP_LOGI(TAG, "Backlight set to %d%%", brightness);
                 }
                 return true;
+            });
+    }
+
+    void RegisterMcpMusicTools() {
+        auto& mcp_server = McpServer::GetInstance();
+
+        mcp_server.AddTool("self.music.play",
+            "播放音乐。先断开语音服务连接，播放完毕后自动重连",
+            PropertyList({
+                Property("song_name", kPropertyTypeString, std::string("")),
+                Property("artist_name", kPropertyTypeString, std::string("")),
+            }),
+            [this](const PropertyList& properties) -> ReturnValue {
+                std::string song = properties["song_name"].value<std::string>();
+                std::string artist = properties["artist_name"].value<std::string>();
+                if (song.empty()) {
+                    return std::string("{\"ok\":false,\"message\":\"请提供歌曲名\"}");
+                }
+
+                Application::GetInstance().Schedule([this, song, artist]() {
+                    auto& app = Application::GetInstance();
+                    // 断开语音服务连接
+                    app.ResetProtocol();
+                    vTaskDelay(pdMS_TO_TICKS(100));
+                    // 开始播放
+                    if (!music_->Start(song, artist)) {
+                        app.Alert("Error", "播放失败", "neutral", Lang::Sounds::OGG_EXCLAMATION);
+                    }
+                });
+                return std::string("{\"ok\":true,\"message\":\"正在播放 " + song + "\"}");
+            });
+
+        mcp_server.AddTool("self.music.stop",
+            "停止播放音乐",
+            PropertyList(),
+            [this](const PropertyList& properties) -> ReturnValue {
+                if (music_ && music_->IsPlaying()) {
+                    music_->Stop();
+                    return std::string("{\"ok\":true,\"message\":\"已停止播放\"}");
+                }
+                return std::string("{\"ok\":false,\"message\":\"当前未在播放\"}");
+            });
+
+        mcp_server.AddTool("self.music.search",
+            "搜索歌曲（不播放），返回搜索结果JSON",
+            PropertyList({
+                Property("song_name", kPropertyTypeString, std::string("")),
+                Property("artist_name", kPropertyTypeString, std::string("")),
+            }),
+            [this](const PropertyList& properties) -> ReturnValue {
+                std::string song = properties["song_name"].value<std::string>();
+                std::string artist = properties["artist_name"].value<std::string>();
+                if (song.empty() && artist.empty()) {
+                    return std::string("{\"ok\":false,\"message\":\"请提供歌曲名或艺术家名\"}");
+                }
+                std::string result = music_->Search(song, artist);
+                return result;
             });
     }
 
@@ -446,13 +508,20 @@ private:
         boot_button_.OnClick([this]() {
             auto& app = Application::GetInstance();
             ESP_LOGI(TAG, "Boot button single click, state=%d", app.GetDeviceState());
+
+            // 正在播放音乐时，单击停止
+            if (music_ && music_->IsPlaying()) {
+                music_->Stop();
+                return;
+            }
+
             if (app.GetDeviceState() == kDeviceStateStarting) {
                     auto& wifi_board = static_cast<WifiBoard&>(GetCurrentBoard());
                     wifi_board.EnterWifiConfigMode();
             }
             // 恢复背光
             RestoreBacklightFromSettings();
-            app.WakeWordInvoke(Lang::Strings::HELLO_ARE_YOU_HERE);
+            app.WakeWordInvoke(Lang::Strings::HELLO_MY_FRIEND);
         });
         boot_button_.OnLongPress([this]() {
             ESP_LOGI(TAG, "Boot button long press, request network switch");
@@ -638,7 +707,11 @@ public:
         InitializeButtons();
         Initializebq27220();
 
+        // 创建音乐播放器
+        music_ = CreateMusic();
+
         RegisterMcpTools();
+        RegisterMcpMusicTools();
         RegisterLocalMcpTools();
     }
 
@@ -662,6 +735,10 @@ public:
 
     virtual Display* GetDisplay() override {
         return display_;
+    }
+
+    virtual Music* GetMusic() override {
+        return music_;
     }
 
     virtual bool GetBatteryLevel(int &level, bool& charging, bool& discharging) override
