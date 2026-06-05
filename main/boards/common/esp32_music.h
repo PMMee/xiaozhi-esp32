@@ -80,7 +80,7 @@ private:
     std::mutex http_mutex_;
     Http* active_http_{nullptr};
 
-    static constexpr size_t kMp3ReadBufSize = 16384;
+    static constexpr size_t kMp3ReadBufSize = 1024 * 8;
     static constexpr size_t kPcmOutBufSize  = 4608;  // 1152 * 2 * 2
 
     // Event bits

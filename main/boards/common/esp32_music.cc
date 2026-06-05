@@ -398,9 +398,9 @@ exit_task:
             display->ShowNotification("播放完毕");
         }
 
-        // 先切到 idle，再唤醒触发重连
-        Application::GetInstance().SetDeviceState(kDeviceStateIdle);
-        Application::GetInstance().WakeWordInvoke("音乐播放完毕");
+        // 重建协议连接（Reconnect 内部会触发 wake word 进入对话）
+        auto& app = Application::GetInstance();
+        app.Reconnect();
     });
 
     self->music_task_handle_ = nullptr;
@@ -503,65 +503,60 @@ void Esp32Music::MusicTaskLoop() {
                      status, (unsigned)http->GetBodyLength());
 
             // 流式读取 + 解码 + 播放
+            // 策略：先尽量填满缓冲区，然后批量解码多帧写入I2S，
+            // 只在缓冲区不足时再读HTTP，避免串行读-解码-写造成的音频间隙
             size_t buf_pos = 0;
             bool first_frame = true;
-            int reads_done = 0;
             int total_body_bytes = 0;
 
             while (!stop_requested_.load()) {
-                int bytes_read = http->Read(reinterpret_cast<char*>(mp3_read_buf_.data() + buf_pos),
-                                             kMp3ReadBufSize - buf_pos);
-                reads_done++;
+                // 先尽量从HTTP读取数据填满缓冲区
+                if (buf_pos < kMp3ReadBufSize / 4) {
+                    int bytes_read = http->Read(
+                        reinterpret_cast<char*>(mp3_read_buf_.data() + buf_pos),
+                        kMp3ReadBufSize - buf_pos);
 
-                if (bytes_read < 0) {
-                    ESP_LOGW(TAG, "[STREAM] Read#%d returned %d (ERR), decoded=%d total=%d buf=%d",
-                             reads_done, bytes_read, (int)!first_frame, total_body_bytes, (int)buf_pos);
-                    break;
+                    if (bytes_read < 0) {
+                        ESP_LOGW(TAG, "[STREAM] Read ERR, decoded=%d total=%d buf=%d",
+                                 (int)!first_frame, total_body_bytes, (int)buf_pos);
+                        break;
+                    }
+
+                    if (bytes_read == 0) {
+                        ESP_LOGI(TAG, "[STREAM] EOF, decoded=%d total=%d buf=%d",
+                                 (int)!first_frame, total_body_bytes, (int)buf_pos);
+                        if (!first_frame) stream_success = true;
+                        break;
+                    }
+
+                    total_body_bytes += bytes_read;
+                    buf_pos += bytes_read;
                 }
 
-                if (bytes_read == 0) {
-                    ESP_LOGI(TAG, "[STREAM] Read#%d EOF, decoded=%d total=%d buf=%d",
-                             reads_done, (int)!first_frame, total_body_bytes, (int)buf_pos);
-                    if (!first_frame) stream_success = true;
-                    break;
-                }
-
-                total_body_bytes += bytes_read;
-                buf_pos += bytes_read;
-
-                // 跳过 ID3v2 标签（QQ音乐MP3流开头有元数据）
+                // 跳过 ID3v2 标签
                 if (first_frame && buf_pos >= 10) {
                     if (memcmp(mp3_read_buf_.data(), "ID3", 3) == 0) {
-                        // ID3v2 header: "ID3" + ver(2) + flags(1) + size(4 synchsafe)
                         uint32_t id3_size = ((mp3_read_buf_[6] & 0x7F) << 21) |
                                            ((mp3_read_buf_[7] & 0x7F) << 14) |
                                            ((mp3_read_buf_[8] & 0x7F) << 7) |
                                            (mp3_read_buf_[9] & 0x7F);
-                        id3_size += 10; // + header size
+                        id3_size += 10;
                         ESP_LOGI(TAG, "[STREAM] Found ID3v2 tag, size=%u bytes", id3_size);
                         if (id3_size < buf_pos) {
-                            memmove(mp3_read_buf_.data(), mp3_read_buf_.data() + id3_size, buf_pos - id3_size);
+                            memmove(mp3_read_buf_.data(), mp3_read_buf_.data() + id3_size,
+                                    buf_pos - id3_size);
                             buf_pos -= id3_size;
-                            ESP_LOGI(TAG, "[STREAM] Skipped ID3 tag, remaining=%d", (int)buf_pos);
-                            // Hex dump 前 64 字节
-                            char hex[193];
-                            int dump_len = buf_pos > 64 ? 64 : (int)buf_pos;
-                            for (int i = 0; i < dump_len; i++) {
-                                snprintf(hex + i*3, 4, "%02X ", mp3_read_buf_[i]);
-                            }
-                            hex[dump_len*3] = '\0';
-                            ESP_LOGI(TAG, "[STREAM] After ID3 first %d bytes: %s", dump_len, hex);
                         }
                     }
                 }
 
+                // 尝试解码一帧
                 unsigned char* inbuf = mp3_read_buf_.data();
                 int bytes_left = static_cast<int>(buf_pos);
                 int decode_result = MP3Decode(mp3_decoder_, &inbuf, &bytes_left,
                                                pcm_out_buf_.data(), 0);
 
                 if (decode_result == ERR_MP3_NONE) {
-                    // 解码成功，获取帧信息
                     MP3GetLastFrameInfo(mp3_decoder_, &mp3_frame_info_);
                     int samples = mp3_frame_info_.outputSamps;
 
@@ -581,9 +576,20 @@ void Esp32Music::MusicTaskLoop() {
                     } else if (consumed >= static_cast<int>(buf_pos)) {
                         buf_pos = 0;
                     }
+                    // 继续循环，尽量多解码几帧再读HTTP
                 } else if (decode_result == ERR_MP3_INDATA_UNDERFLOW) {
-                    // 需要更多数据
-                    vTaskDelay(pdMS_TO_TICKS(10));
+                    // 数据不足，不延迟，立即回循环顶部读HTTP
+                    if (buf_pos >= kMp3ReadBufSize - 1024) {
+                        // 缓冲区已满但没有完整帧，跳过一些数据找同步字
+                        int sync = MP3FindSyncWord(mp3_read_buf_.data(), static_cast<int>(buf_pos));
+                        if (sync > 0) {
+                            memmove(mp3_read_buf_.data(), mp3_read_buf_.data() + sync, buf_pos - sync);
+                            buf_pos -= sync;
+                        } else {
+                            buf_pos = 0;
+                        }
+                    }
+                    // buf_pos < threshold，继续读HTTP
                 } else {
                     static int decode_err_cnt = 0;
                     int sync_offset = -1;
@@ -596,7 +602,8 @@ void Esp32Music::MusicTaskLoop() {
                     }
                     if (buf_pos > 4) {
                         if (sync_offset >= 0) {
-                            memmove(mp3_read_buf_.data(), mp3_read_buf_.data() + sync_offset, buf_pos - sync_offset);
+                            memmove(mp3_read_buf_.data(), mp3_read_buf_.data() + sync_offset,
+                                    buf_pos - sync_offset);
                             buf_pos -= sync_offset;
                         } else {
                             buf_pos = 0;

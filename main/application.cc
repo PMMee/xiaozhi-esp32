@@ -779,6 +779,12 @@ void Application::HandleStopListeningEvent() {
 
 void Application::HandleWakeWordDetectedEvent() {
     if (!protocol_) {
+        // 检查是否正在播放音乐，如果是则停止音乐（音乐退出后会重连并触发对话）
+        auto music = Board::GetInstance().GetMusic();
+        if (music && music->IsPlaying()) {
+            ESP_LOGI(TAG, "Wake word detected during music playback, stopping music");
+            music->Stop();
+        }
         return;
     }
 
@@ -1126,6 +1132,18 @@ void Application::ResetProtocol() {
         }
         // Reset protocol
         protocol_.reset();
+    });
+}
+
+void Application::Reconnect() {
+    Schedule([this]() {
+        // 重建 OTA 读取配置，走正常 InitializeProtocol 流程（和启动时一致）
+        ota_ = std::make_unique<Ota>();
+        InitializeProtocol();
+        ota_.reset();
+        SetDeviceState(kDeviceStateIdle);
+        // 协议就绪后触发唤醒进入对话
+        WakeWordInvoke("音乐播放完毕");
     });
 }
 

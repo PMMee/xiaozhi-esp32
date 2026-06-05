@@ -401,10 +401,8 @@ private:
 
                 Application::GetInstance().Schedule([this, song, artist]() {
                     auto& app = Application::GetInstance();
-                    // 断开语音服务连接
                     app.ResetProtocol();
-                    vTaskDelay(pdMS_TO_TICKS(100));
-                    // 开始播放
+                    vTaskDelay(pdMS_TO_TICKS(200));
                     if (!music_->Start(song, artist)) {
                         app.Alert("Error", "播放失败", "neutral", Lang::Sounds::OGG_EXCLAMATION);
                     }
