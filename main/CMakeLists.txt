@@ -831,7 +831,7 @@ elseif(CONFIG_BOARD_TYPE_AETHERTOYS_WIFI_CN)
     set(BOARD_TYPE "aethertoys-wifi-cn")
     set(BUILTIN_TEXT_FONT font_puhui_basic_16_4)
     set(BUILTIN_ICON_FONT font_awesome_16_4)
-    set(DEFAULT_EMOJI_COLLECTION twemoji_32)
+    set(DEFAULT_EMOJI_COLLECTION none)
 endif()
 
 if(MANUFACTURER)
@@ -1222,10 +1222,11 @@ partition_table_get_partition_info(offset "--partition-name assets" "offset")
 if ("${size}" AND "${offset}")
     # Flash assets based on configuration
     if(CONFIG_FLASH_DEFAULT_ASSETS)
-        # Build default assets based on configuration
+        # Build default assets（包含 left/ GIF）
+        set(DEFAULT_ASSETS_EXTRA_FILES "${CMAKE_SOURCE_DIR}/left")
         build_default_assets_bin()
         esptool_py_flash_to_partition(flash "assets" "${GENERATED_ASSETS_LOCAL_FILE}")
-        message(STATUS "Generated default assets flash configured: ${GENERATED_ASSETS_LOCAL_FILE} -> assets partition")
+        message(STATUS "Generated default assets (with left/ GIFs): ${GENERATED_ASSETS_LOCAL_FILE} -> assets partition")
     elseif(CONFIG_FLASH_CUSTOM_ASSETS)
         # Flash custom assets
         get_assets_local_file("${CONFIG_CUSTOM_ASSETS_FILE}" ASSETS_LOCAL_FILE)

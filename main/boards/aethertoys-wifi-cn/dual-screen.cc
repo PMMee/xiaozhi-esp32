@@ -7,7 +7,9 @@
 #include "button.h"
 #include "config.h"
 #include "esp_lcd_gc9d01.h"
+#include <esp_lvgl_port.h>
 #include <esp_log.h>
+#include <esp_random.h>
 #include <driver/i2c_master.h>
 #include <driver/ledc.h>
 #include <driver/spi_common.h>
@@ -90,6 +92,20 @@ static constexpr int64_t kIdleBacklightDelayUs = 30 * 1000 * 1000LL;
 static constexpr ledc_timer_t kDualBacklightTimer = LEDC_TIMER_2;
 static constexpr ledc_channel_t kLeftBacklightChannel = LEDC_CHANNEL_2;
 static constexpr ledc_channel_t kRightBacklightChannel = LEDC_CHANNEL_3;
+
+// 双屏镜像：单 LVGL 实例渲染，两个面板 CS 永久拉低同时接收
+static esp_lcd_panel_handle_t s_mirror_panel_primary = nullptr;
+
+static void dual_flush_cb(lv_display_t *disp, const lv_area_t *area, uint8_t *px_map) {
+    // 字节交换（与原始 lvgl_port_flush_callback 行为一致）
+    size_t len = lv_area_get_size(area);
+    lv_draw_sw_rgb565_swap(px_map, len);
+
+    if (s_mirror_panel_primary != nullptr) {
+        esp_lcd_panel_draw_bitmap(s_mirror_panel_primary,
+            area->x1, area->y1, area->x2 + 1, area->y2 + 1, px_map);
+    }
+}
 
 class DualPwmBacklight : public Backlight {
 public:
@@ -381,6 +397,39 @@ private:
                 }
                 return true;
             });
+
+        // 表情控制
+        mcp_server.AddTool("self.emotion.set",
+            "设置屏幕表情。支持: neutral, happy, laughing, sad, angry, crying, loving, surprised, shocked, thinking, winking, confused, sleepy, delicious, kissy, cool, silly",
+            PropertyList({
+                Property("emotion", kPropertyTypeString, std::string("neutral"))
+            }),
+            [this](const PropertyList& properties) -> ReturnValue {
+                std::string emotion = properties["emotion"].value<std::string>();
+                if (display_ != nullptr) {
+                    display_->SetEmotion(emotion.c_str());
+                    ESP_LOGI(TAG, "Emotion set to: %s", emotion.c_str());
+                }
+                return std::string("{\"ok\":true,\"emotion\":\"") + emotion + "\"}";
+            });
+
+        mcp_server.AddTool("self.emotion.random",
+            "随机切换屏幕表情",
+            PropertyList(),
+            [this](const PropertyList& properties) -> ReturnValue {
+                static const char* emotions[] = {
+                    "neutral", "happy", "laughing", "sad", "angry", "crying",
+                    "loving", "surprised", "shocked", "thinking", "winking",
+                    "confused", "sleepy", "delicious", "kissy", "cool", "silly"
+                };
+                static const int count = sizeof(emotions) / sizeof(emotions[0]);
+                const char* emotion = emotions[esp_random() % count];
+                if (display_ != nullptr) {
+                    display_->SetEmotion(emotion);
+                    ESP_LOGI(TAG, "Random emotion: %s", emotion);
+                }
+                return std::string("{\"ok\":true,\"emotion\":\"") + emotion + "\"}";
+            });
     }
 
     void RegisterMcpMusicTools() {
@@ -623,7 +672,7 @@ private:
         vTaskDelay(pdMS_TO_TICKS(20));
         ESP_ERROR_CHECK(esp_lcd_panel_init(panel_handle1));
         vTaskDelay(pdMS_TO_TICKS(20));
-        ESP_ERROR_CHECK(esp_lcd_panel_invert_color(panel_handle1, true));
+        ESP_ERROR_CHECK(esp_lcd_panel_invert_color(panel_handle1, false));
         ESP_ERROR_CHECK(esp_lcd_panel_swap_xy(panel_handle1, DISPLAY_LEFT_SWAP_XY));
         ESP_ERROR_CHECK(esp_lcd_panel_mirror(panel_handle1, DISPLAY_LEFT_MIRROR_X, DISPLAY_LEFT_MIRROR_Y));
         ESP_ERROR_CHECK(esp_lcd_panel_disp_on_off(panel_handle1, true));
@@ -632,19 +681,46 @@ private:
         vTaskDelay(pdMS_TO_TICKS(20));
         ESP_ERROR_CHECK(esp_lcd_panel_init(panel_handle2));
         vTaskDelay(pdMS_TO_TICKS(20));
-        ESP_ERROR_CHECK(esp_lcd_panel_invert_color(panel_handle2, true));
+        ESP_ERROR_CHECK(esp_lcd_panel_invert_color(panel_handle2, false));
         ESP_ERROR_CHECK(esp_lcd_panel_swap_xy(panel_handle2, DISPLAY_RIGHT_SWAP_XY));
         ESP_ERROR_CHECK(esp_lcd_panel_mirror(panel_handle2, DISPLAY_RIGHT_MIRROR_X, DISPLAY_RIGHT_MIRROR_Y));
         ESP_ERROR_CHECK(esp_lcd_panel_disp_on_off(panel_handle2, true));
 
+        // LVGL 以无旋转模式渲染（逻辑正向），同一帧缓冲发给两个面板
+        // 各面板硬件独立旋转（左90°CCW / 右180°），补偿物理安装角度
         dual_display_[0] = new SpiLcdDisplay(io_handle1, panel_handle1,
                         DISPLAY_WIDTH, DISPLAY_HEIGHT,
                         DISPLAY_OFFSET_X, DISPLAY_OFFSET_Y,
-                        DISPLAY_LEFT_MIRROR_X, DISPLAY_LEFT_MIRROR_Y, DISPLAY_LEFT_SWAP_XY);
-        dual_display_[1] = new SpiLcdDisplay(io_handle2, panel_handle2,
-                        DISPLAY_WIDTH, DISPLAY_HEIGHT,
-                        DISPLAY_OFFSET_X, DISPLAY_OFFSET_Y,
-                        DISPLAY_RIGHT_MIRROR_X, DISPLAY_RIGHT_MIRROR_Y, DISPLAY_RIGHT_SWAP_XY);
+                        false, false, false);  // LVGL 无旋转
+        dual_display_[1] = dual_display_[0];
+
+        // 重新应用硬件旋转（lvgl_port_add_disp 会用 LVGL 旋转覆盖硬件设置）
+        // 注意：这是最后一次使用 io_handle2，之后 GPIO9 将永久拉低
+        esp_lcd_panel_swap_xy(panel_handle1, DISPLAY_LEFT_SWAP_XY);
+        esp_lcd_panel_mirror(panel_handle1, DISPLAY_LEFT_MIRROR_X, DISPLAY_LEFT_MIRROR_Y);
+        esp_lcd_panel_swap_xy(panel_handle2, DISPLAY_RIGHT_SWAP_XY);
+        esp_lcd_panel_mirror(panel_handle2, DISPLAY_RIGHT_MIRROR_X, DISPLAY_RIGHT_MIRROR_Y);
+
+        // 存储面板句柄
+        s_mirror_panel_primary = panel_handle1;
+
+        // 替换 flush 回调
+        lv_display_t *lv_disp = lv_display_get_next(NULL);
+        if (lv_disp != nullptr) {
+            lv_display_set_flush_cb(lv_disp, dual_flush_cb);
+        }
+
+        // 初始化完成后，永久拉低右屏 CS (GPIO9)
+        // GC9D01 无 MISO 回读，两个 CS 同时低电平 → 所有 SPI 数据两个面板同时接收
+        gpio_config_t right_cs_cfg = {
+            .pin_bit_mask = (1ULL << DISPLAY_RIGHT_SPI_CS_PIN),
+            .mode = GPIO_MODE_OUTPUT,
+            .pull_up_en = GPIO_PULLUP_DISABLE,
+            .pull_down_en = GPIO_PULLDOWN_DISABLE,
+            .intr_type = GPIO_INTR_DISABLE,
+        };
+        gpio_config(&right_cs_cfg);
+        gpio_set_level(DISPLAY_RIGHT_SPI_CS_PIN, 0);  // 永久拉低
 
     }
 
@@ -700,7 +776,8 @@ public:
         Initialize4G();
 
         InitializeSpi();
-        InitializeDisplay();
+        IntializeDualScreen();
+        display_ = dual_display_[0];
         InitializeBacklight();
         InitializeButtons();
         Initializebq27220();

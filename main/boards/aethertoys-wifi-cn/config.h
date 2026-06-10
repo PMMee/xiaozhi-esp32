@@ -24,11 +24,17 @@
 #define DISPLAY_WIDTH   160
 #define DISPLAY_HEIGHT  160
 
-#define DISPLAY_SPI_SCLK_PIN    GPIO_NUM_16
+// #define DISPLAY_SPI_SCLK_PIN    GPIO_NUM_16
+// #define DISPLAY_SPI_MOSI_PIN    GPIO_NUM_17
+
+// #define DISPLAY_SPI_DC_PIN      GPIO_NUM_18
+// #define DISPLAY_SPI_RESET_PIN   GPIO_NUM_3
+
+#define DISPLAY_SPI_SCLK_PIN    GPIO_NUM_18
 #define DISPLAY_SPI_MOSI_PIN    GPIO_NUM_17
 
-#define DISPLAY_SPI_DC_PIN      GPIO_NUM_18
-#define DISPLAY_SPI_RESET_PIN   GPIO_NUM_3
+#define DISPLAY_SPI_DC_PIN      GPIO_NUM_3
+#define DISPLAY_SPI_RESET_PIN   GPIO_NUM_16
 
 #define DISPLAY_SWAP_XY  false
 #define DISPLAY_MIRROR_X true
@@ -36,14 +42,15 @@
 #define DISPLAY_OFFSET_X  0
 #define DISPLAY_OFFSET_Y  0
 #define DISPLAY_BACKLIGHT_OUTPUT_INVERT true
-#define DISPLAY_BACKLIGHT_INITIAL_LEVEL 0
+#define DISPLAY_BACKLIGHT_INITIAL_LEVEL 1
 
 // 双屏独立旋转配置 (GC9D01 160x160 圆形屏)
-// 左屏：左转 90° (CCW) — swap_xy + mirror_y
-#define DISPLAY_LEFT_SWAP_XY  true
+// 统一 MV=0 (swap_xy=false)，通过 mirror 组合实现不同方向
+// 左屏：0° — 无旋转
+#define DISPLAY_LEFT_SWAP_XY  false
 #define DISPLAY_LEFT_MIRROR_X false
-#define DISPLAY_LEFT_MIRROR_Y true
-// 右屏：右转 180° — mirror_x + mirror_y
+#define DISPLAY_LEFT_MIRROR_Y false
+// 右屏：180° — mirror_x + mirror_y
 #define DISPLAY_RIGHT_SWAP_XY  false
 #define DISPLAY_RIGHT_MIRROR_X true
 #define DISPLAY_RIGHT_MIRROR_Y true

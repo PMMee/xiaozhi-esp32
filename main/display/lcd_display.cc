@@ -18,6 +18,8 @@
 
 #define TAG "LcdDisplay"
 
+static bool s_lvgl_port_initialized = false;
+
 LV_FONT_DECLARE(BUILTIN_TEXT_FONT);
 LV_FONT_DECLARE(BUILTIN_ICON_FONT);
 LV_FONT_DECLARE(font_awesome_30_4);
@@ -90,7 +92,8 @@ LcdDisplay::LcdDisplay(esp_lcd_panel_io_handle_t panel_io, esp_lcd_panel_handle_
 }
 
 SpiLcdDisplay::SpiLcdDisplay(esp_lcd_panel_io_handle_t panel_io, esp_lcd_panel_handle_t panel,
-                           int width, int height, int offset_x, int offset_y, bool mirror_x, bool mirror_y, bool swap_xy)
+                           int width, int height, int offset_x, int offset_y, bool mirror_x, bool mirror_y, bool swap_xy,
+                           int buffer_rows)
     : LcdDisplay(panel_io, panel, width, height) {
 
     // draw white
@@ -131,14 +134,17 @@ SpiLcdDisplay::SpiLcdDisplay(esp_lcd_panel_io_handle_t panel_io, esp_lcd_panel_h
 #if CONFIG_SOC_CPU_CORES_NUM > 1
     port_cfg.task_affinity = 1;
 #endif
-    lvgl_port_init(&port_cfg);
+    if (!s_lvgl_port_initialized) {
+        lvgl_port_init(&port_cfg);
+        s_lvgl_port_initialized = true;
+    }
 
     ESP_LOGI(TAG, "Adding LCD display");
     const lvgl_port_display_cfg_t display_cfg = {
         .io_handle = panel_io_,
         .panel_handle = panel_,
         .control_handle = nullptr,
-        .buffer_size = static_cast<uint32_t>(width_ * 20),
+        .buffer_size = static_cast<uint32_t>(width_ * buffer_rows),
         .double_buffer = false,
         .trans_size = 0,
         .hres = static_cast<uint32_t>(width_),
@@ -191,7 +197,10 @@ RgbLcdDisplay::RgbLcdDisplay(esp_lcd_panel_io_handle_t panel_io, esp_lcd_panel_h
     lvgl_port_cfg_t port_cfg = ESP_LVGL_PORT_INIT_CONFIG();
     port_cfg.task_priority = 1;
     port_cfg.timer_period_ms = 50;
-    lvgl_port_init(&port_cfg);
+    if (!s_lvgl_port_initialized) {
+        lvgl_port_init(&port_cfg);
+        s_lvgl_port_initialized = true;
+    }
 
     ESP_LOGI(TAG, "Adding LCD display");
     const lvgl_port_display_cfg_t display_cfg = {
@@ -242,7 +251,10 @@ MipiLcdDisplay::MipiLcdDisplay(esp_lcd_panel_io_handle_t panel_io, esp_lcd_panel
 
     ESP_LOGI(TAG, "Initialize LVGL port");
     lvgl_port_cfg_t port_cfg = ESP_LVGL_PORT_INIT_CONFIG();
-    lvgl_port_init(&port_cfg);
+    if (!s_lvgl_port_initialized) {
+        lvgl_port_init(&port_cfg);
+        s_lvgl_port_initialized = true;
+    }
 
     ESP_LOGI(TAG, "Adding LCD display");
     const lvgl_port_display_cfg_t disp_cfg = {
@@ -1307,4 +1319,38 @@ void LcdDisplay::SetHideSubtitle(bool hide) {
             }
         }
     }
+}
+
+void LcdDisplay::SetEmoteOnlyMode(bool emote_only) {
+    DisplayLockGuard lock(this);
+    emote_only_ = emote_only;
+    if (emote_only) {
+        // 隐藏 LcdDisplay 的 UI 元素
+        if (top_bar_ != nullptr) lv_obj_add_flag(top_bar_, LV_OBJ_FLAG_HIDDEN);
+        if (status_bar_ != nullptr) lv_obj_add_flag(status_bar_, LV_OBJ_FLAG_HIDDEN);
+        if (bottom_bar_ != nullptr) lv_obj_add_flag(bottom_bar_, LV_OBJ_FLAG_HIDDEN);
+        if (side_bar_ != nullptr) lv_obj_add_flag(side_bar_, LV_OBJ_FLAG_HIDDEN);
+        hide_subtitle_ = true;
+        // 隐藏 LvglDisplay 的状态/通知/网络/电池标签
+        if (status_label_ != nullptr) lv_obj_add_flag(status_label_, LV_OBJ_FLAG_HIDDEN);
+        if (notification_label_ != nullptr) lv_obj_add_flag(notification_label_, LV_OBJ_FLAG_HIDDEN);
+        if (network_label_ != nullptr) lv_obj_add_flag(network_label_, LV_OBJ_FLAG_HIDDEN);
+        if (battery_label_ != nullptr) lv_obj_add_flag(battery_label_, LV_OBJ_FLAG_HIDDEN);
+        if (mute_label_ != nullptr) lv_obj_add_flag(mute_label_, LV_OBJ_FLAG_HIDDEN);
+    }
+}
+
+void LcdDisplay::SetStatus(const char* status) {
+    if (emote_only_) return;  // 表情模式：跳过状态文字
+    LvglDisplay::SetStatus(status);
+}
+
+void LcdDisplay::ShowNotification(const char* notification, int duration_ms) {
+    if (emote_only_) return;  // 表情模式：跳过通知
+    LvglDisplay::ShowNotification(notification, duration_ms);
+}
+
+void LcdDisplay::ShowNotification(const std::string& notification, int duration_ms) {
+    if (emote_only_) return;
+    LvglDisplay::ShowNotification(notification, duration_ms);
 }

@@ -35,6 +35,7 @@ protected:
     esp_timer_handle_t preview_timer_ = nullptr;
     std::unique_ptr<LvglImage> preview_image_cached_ = nullptr;
     bool hide_subtitle_ = false;  // Control whether to hide chat messages/subtitles
+    bool emote_only_ = false;     // 只显示表情模式
 
     void InitializeLcdThemes();
     virtual bool Lock(int timeout_ms = 0) override;
@@ -56,6 +57,13 @@ public:
     
     // Set whether to hide chat messages/subtitles
     void SetHideSubtitle(bool hide);
+    // 只显示表情模式：隐藏状态栏/时间/聊天消息
+    void SetEmoteOnlyMode(bool emote_only);
+
+    // 重写：表情模式下跳过状态/通知
+    virtual void SetStatus(const char* status) override;
+    virtual void ShowNotification(const char* notification, int duration_ms = 3000) override;
+    virtual void ShowNotification(const std::string &notification, int duration_ms = 3000) override;
 };
 
 // SPI LCD display
@@ -63,7 +71,8 @@ class SpiLcdDisplay : public LcdDisplay {
 public:
     SpiLcdDisplay(esp_lcd_panel_io_handle_t panel_io, esp_lcd_panel_handle_t panel,
                   int width, int height, int offset_x, int offset_y,
-                  bool mirror_x, bool mirror_y, bool swap_xy);
+                  bool mirror_x, bool mirror_y, bool swap_xy,
+                  int buffer_rows = 20);
 };
 
 // RGB LCD display

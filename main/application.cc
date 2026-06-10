@@ -1,6 +1,7 @@
 #include "application.h"
 #include "board.h"
 #include "display.h"
+#include "display/lcd_display.h"
 #include "system_info.h"
 #include "audio_codec.h"
 #include "mqtt_protocol.h"
@@ -65,6 +66,12 @@ void Application::Initialize() {
     // Setup the display
     auto display = board.GetDisplay();
     display->SetupUI();
+
+    // 只显示表情模式（无状态栏/时间）
+    if (auto* lcd = dynamic_cast<LcdDisplay*>(display)) {
+        lcd->SetEmoteOnlyMode(true);
+    }
+
     // Print board name/version info
     display->SetChatMessage("system", SystemInfo::GetUserAgent().c_str());
 

@@ -29,6 +29,10 @@
 #include "gfx.h"
 #include "expression_emote.h"
 
+// GFX widget headers for direct GIF animation control
+#include "widget/gfx_anim.h"
+#include "core/gfx_obj.h"
+
 
 namespace emote {
 
@@ -37,12 +41,6 @@ namespace emote {
 // ============================================================================
 
 static const char* TAG = "EmoteDisplay";
-
-// ============================================================================
-// Forward Declarations
-// ============================================================================
-
-class EmoteDisplay;
 
 // ============================================================================
 // Helper Functions
@@ -58,8 +56,9 @@ static bool OnFlushIoReady(const esp_lcd_panel_io_handle_t panel_io,
     return true;
 }
 
-// Flush callback for emote
-static void OnFlushCallback(int x_start, int y_start, int x_end, int y_end, const void* data, emote_handle_t handle)
+// Flush callback for emote — draws to LCD panel
+static void OnFlushCallback(int x_start, int y_start, int x_end, int y_end,
+                            const void* data, emote_handle_t handle)
 {
     esp_lcd_panel_handle_t panel = (esp_lcd_panel_handle_t)emote_get_user_data(handle);
     if (panel != nullptr) {
@@ -68,10 +67,11 @@ static void OnFlushCallback(int x_start, int y_start, int x_end, int y_end, cons
 }
 
 // ============================================================================
-// Graphics Initialization Functions
+// Emote Engine Initialization
 // ============================================================================
 
-static emote_handle_t InitializeEmote(const esp_lcd_panel_handle_t panel, const int width, const int height)
+static emote_handle_t InitializeEmote(const esp_lcd_panel_handle_t panel,
+                                      const int width, const int height)
 {
     if (!panel) {
         ESP_LOGE(TAG, "Invalid panel");
@@ -115,7 +115,8 @@ static emote_handle_t InitializeEmote(const esp_lcd_panel_handle_t panel, const 
 // EmoteDisplay Class Implementation
 // ============================================================================
 
-EmoteDisplay::EmoteDisplay(const esp_lcd_panel_handle_t panel, const esp_lcd_panel_io_handle_t panel_io,
+EmoteDisplay::EmoteDisplay(const esp_lcd_panel_handle_t panel,
+                           const esp_lcd_panel_io_handle_t panel_io,
                            const int width, const int height)
 {
     emote_handle_ = InitializeEmote(panel, width, height);
@@ -134,76 +135,145 @@ EmoteDisplay::~EmoteDisplay()
     }
 }
 
+// ============================================================================
+// 核心：混合模式 SetEmotion
+// 优先使用本地加载的 GIF 数据（AddEmojiData 注册的）
+// 否则回退到 expression_emote 的分区资产
+// ============================================================================
+
 void EmoteDisplay::SetEmotion(const char* const emotion)
 {
+    if (!emotion || !emote_handle_) {
+        return;
+    }
+
     ESP_LOGI(TAG, "SetEmotion: %s", emotion);
-    if (emote_handle_ && emotion && strlen(emotion) > 0) {
-        emote_set_anim_emoji(emote_handle_, emotion);
+
+    // 1. 检查本地 GIF 数据
+    auto it = emoji_data_map_.find(emotion);
+    if (it != emoji_data_map_.end()) {
+        SetEmotionGfx(it->second);
+        return;
+    }
+
+    // 2. 回退到 expression_emote 分区资产
+    emote_set_anim_emoji(emote_handle_, emotion);
+}
+
+// ============================================================================
+// 通过 GFX API 直接设置表情动画（用于本地加载的 GIF）
+// ============================================================================
+
+void EmoteDisplay::SetEmotionGfx(const AssetData& emoji)
+{
+    if (!emoji.data || emoji.size == 0) {
+        ESP_LOGW(TAG, "SetEmotionGfx: empty data");
+        return;
+    }
+
+    emote_lock(emote_handle_);
+
+    // 获取或创建 eye_anim 对象
+    gfx_obj_t* eye = emote_get_obj_by_name(emote_handle_, EMT_DEF_ELEM_EYE_ANIM);
+    if (!eye) {
+        // 默认对象不可用，尝试创建一个
+        eye = emote_create_obj_by_type(emote_handle_, EMOTE_OBJ_TYPE_ANIM, EMT_DEF_ELEM_EYE_ANIM);
+    }
+    if (!eye) {
+        ESP_LOGW(TAG, "SetEmotionGfx: cannot get/create eye_anim object");
+        emote_unlock(emote_handle_);
+        return;
+    }
+
+    gfx_anim_set_src(eye, emoji.data, emoji.size);
+
+    int fps = emoji.fps > 0 ? emoji.fps : 20;
+    gfx_anim_set_segment(eye, 0, 0xFFFF, fps, emoji.loop);
+    gfx_obj_set_visible(eye, true);
+    gfx_anim_start(eye);
+
+    emote_unlock(emote_handle_);
+}
+
+// ============================================================================
+// 扩展：直接从内存添加表情数据（兼容 left/ 目录 GIF 加载）
+// ============================================================================
+
+void EmoteDisplay::AddEmojiData(const std::string& name, const void* const data,
+                                const size_t size, uint8_t fps, bool loop, bool lack)
+{
+    emoji_data_map_[name] = AssetData(data, size, fps, loop, lack);
+    ESP_LOGD(TAG, "Added emoji data: %s, size: %d, fps: %d, loop: %s",
+             name.c_str(), size, fps, loop ? "true" : "false");
+
+    // 如果第一个加载的是 happy，立即显示
+    if (name == "happy") {
+        SetEmotionGfx(emoji_data_map_["happy"]);
     }
 }
+
+AssetData EmoteDisplay::GetEmojiData(const std::string& name) const
+{
+    auto it = emoji_data_map_.find(name);
+    if (it != emoji_data_map_.end()) {
+        return it->second;
+    }
+    return AssetData();
+}
+
+// ============================================================================
+// expression_emote 原生接口
+// ============================================================================
 
 void EmoteDisplay::SetChatMessage(const char* const role, const char* const content)
 {
     ESP_LOGI(TAG, "SetChatMessage: %s, %s", role, content);
     if (emote_handle_ && content && strlen(content) > 0) {
-        if ((std::strcmp(role, "system") == 0) && std::strstr(content, "xiaozhi.me")) {
-            size_t len = strlen(content);
-            char* new_content = new char[len + 1];
-            strcpy(new_content, content);
-            std::replace(new_content, new_content + len, static_cast<char>(0x0A), static_cast<char>(0x20));
-            emote_set_event_msg(emote_handle_, EMOTE_MGR_EVT_SYS, new_content);
-            delete[] new_content;
-        } else {
-            emote_set_event_msg(emote_handle_, EMOTE_MGR_EVT_SPEAK, content);
-        }
+        emote_set_event_msg(emote_handle_, EMOTE_MGR_EVT_SPEAK, content);
     }
 }
 
 void EmoteDisplay::SetStatus(const char* const status)
 {
+    if (!status || !emote_handle_) {
+        return;
+    }
+
     ESP_LOGI(TAG, "SetStatus: %s", status);
-    if (emote_handle_ && status && strlen(status) > 0) {
-        if (std::strcmp(status, Lang::Strings::LISTENING) == 0) {
-            emote_set_event_msg(emote_handle_, EMOTE_MGR_EVT_LISTEN, NULL);
-        } else if (std::strcmp(status, Lang::Strings::STANDBY) == 0) {
-            emote_set_event_msg(emote_handle_, EMOTE_MGR_EVT_IDLE, NULL);
-        } else if (std::strcmp(status, Lang::Strings::SPEAKING) == 0) {
-            emote_set_event_msg(emote_handle_, EMOTE_MGR_EVT_SPEAK, NULL);
-        } else if (std::strcmp(status, Lang::Strings::ERROR) == 0) {
-            emote_set_event_msg(emote_handle_, EMOTE_MGR_EVT_SET, NULL);
-        }
+
+    if (strcmp(status, Lang::Strings::LISTENING) == 0) {
+        emote_set_event_msg(emote_handle_, EMOTE_MGR_EVT_LISTEN, status);
+    } else if (strcmp(status, Lang::Strings::STANDBY) == 0) {
+        emote_set_event_msg(emote_handle_, EMOTE_MGR_EVT_IDLE, status);
+    } else if (strcmp(status, Lang::Strings::SPEAKING) == 0) {
+        emote_set_event_msg(emote_handle_, EMOTE_MGR_EVT_SPEAK, status);
+    } else {
+        emote_set_event_msg(emote_handle_, EMOTE_MGR_EVT_SYS, status);
     }
 }
 
 void EmoteDisplay::ShowNotification(const char* notification, int duration_ms)
 {
-    ESP_LOGI(TAG, "ShowNotification: %s", notification);
-    if (emote_handle_ && notification && strlen(notification) > 0) {
-        emote_set_event_msg(emote_handle_, EMOTE_MGR_EVT_SYS, notification);
+    if (!notification || !emote_handle_) {
+        return;
     }
+    ESP_LOGI(TAG, "ShowNotification: %s", notification);
+    emote_set_event_msg(emote_handle_, EMOTE_MGR_EVT_SYS, notification);
 }
 
 void EmoteDisplay::UpdateStatusBar(bool update_all)
 {
-    ESP_LOGD(TAG, "UpdateStatusBar: %s", update_all ? "true" : "false");
-    if (!emote_handle_) {
-        return;
-    }
+    // expression_emote 内部管理状态栏
 }
 
 void EmoteDisplay::SetPowerSaveMode(bool on)
 {
     ESP_LOGI(TAG, "SetPowerSaveMode: %s", on ? "ON" : "OFF");
-    if (!emote_handle_) {
-        return;
-    }
 }
 
 void EmoteDisplay::SetPreviewImage(const void* image)
 {
-    if (image) {
-        ESP_LOGI(TAG, "SetPreviewImage: Preview image not supported, using default icon");
-    }
+    // Not implemented for emote display
 }
 
 void EmoteDisplay::SetTheme(Theme* const theme)
@@ -211,30 +281,18 @@ void EmoteDisplay::SetTheme(Theme* const theme)
     ESP_LOGI(TAG, "SetTheme: %p", theme);
 }
 
-bool EmoteDisplay::Lock(const int timeout_ms)
-{
-    (void)timeout_ms;
-    return true;
-}
-
-void EmoteDisplay::Unlock()
-{
-}
-
 bool EmoteDisplay::StopAnimDialog()
 {
-    ESP_LOGI(TAG, "StopAnimDialog");
     if (emote_handle_) {
-        return emote_stop_anim_dialog(emote_handle_);
+        return emote_stop_anim_dialog(emote_handle_) == ESP_OK;
     }
     return false;
 }
 
 bool EmoteDisplay::InsertAnimDialog(const char* emoji_name, uint32_t duration_ms)
 {
-    ESP_LOGI(TAG, "InsertAnimDialog: %s, %" PRIu32, emoji_name, duration_ms);
     if (emote_handle_ && emoji_name) {
-        return emote_insert_anim_dialog(emote_handle_, emoji_name, duration_ms);
+        return emote_insert_anim_dialog(emote_handle_, emoji_name, duration_ms) == ESP_OK;
     }
     return false;
 }
@@ -243,8 +301,60 @@ void EmoteDisplay::RefreshAll()
 {
     if (emote_handle_) {
         emote_notify_all_refresh(emote_handle_);
-        return;
     }
+}
+
+// ============================================================================
+// Lock / Unlock
+// ============================================================================
+
+bool EmoteDisplay::Lock(int timeout_ms)
+{
+    if (emote_handle_) {
+        emote_lock(emote_handle_);
+        return true;
+    }
+    return false;
+}
+
+void EmoteDisplay::Unlock()
+{
+    if (emote_handle_) {
+        emote_unlock(emote_handle_);
+    }
+}
+
+// ============================================================================
+// 兼容旧 Assets 接口
+// ============================================================================
+
+void EmoteDisplay::AddIconData(const std::string& name, const void* data, size_t size)
+{
+    icon_data_map_[name] = AssetData(data, size);
+    ESP_LOGD(TAG, "Added icon data: %s, size: %d", name.c_str(), size);
+}
+
+AssetData EmoteDisplay::GetIconData(const std::string& name) const
+{
+    auto it = icon_data_map_.find(name);
+    if (it != icon_data_map_.end()) {
+        return it->second;
+    }
+    return AssetData();
+}
+
+void EmoteDisplay::AddLayoutData(const std::string& name, const std::string& align_str,
+                                 int x, int y, int width, int height)
+{
+    // expression_emote 内部管理 layout，这里做兼容空实现
+    ESP_LOGD(TAG, "AddLayoutData: %s align=%s x=%d y=%d w=%d h=%d",
+             name.c_str(), align_str.c_str(), x, y, width, height);
+}
+
+void EmoteDisplay::AddTextFont(std::shared_ptr<LvglFont> text_font)
+{
+    text_font_ = text_font;
+    ESP_LOGD(TAG, "AddTextFont: font added");
 }
 
 } // namespace emote
