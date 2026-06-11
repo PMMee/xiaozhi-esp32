@@ -1222,8 +1222,15 @@ partition_table_get_partition_info(offset "--partition-name assets" "offset")
 if ("${size}" AND "${offset}")
     # Flash assets based on configuration
     if(CONFIG_FLASH_DEFAULT_ASSETS)
-        # Build default assets（包含 left/ GIF）
-        set(DEFAULT_ASSETS_EXTRA_FILES "${CMAKE_SOURCE_DIR}/left")
+        # Pre-process left/ GIFs -> left_rotated/ (rotate 90 CCW, never modifies originals)
+        execute_process(
+            COMMAND python ${CMAKE_SOURCE_DIR}/scripts/optimize_gifs.py
+            WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
+            RESULT_VARIABLE _gif_result
+            ERROR_QUIET
+        )
+        # Build default assets（包含旋转后的 left_rotated/ GIFs）
+        set(DEFAULT_ASSETS_EXTRA_FILES "${CMAKE_SOURCE_DIR}/left_rotated")
         build_default_assets_bin()
         esptool_py_flash_to_partition(flash "assets" "${GENERATED_ASSETS_LOCAL_FILE}")
         message(STATUS "Generated default assets (with left/ GIFs): ${GENERATED_ASSETS_LOCAL_FILE} -> assets partition")

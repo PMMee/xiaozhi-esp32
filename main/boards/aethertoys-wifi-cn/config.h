@@ -42,7 +42,7 @@
 #define DISPLAY_OFFSET_X  0
 #define DISPLAY_OFFSET_Y  0
 #define DISPLAY_BACKLIGHT_OUTPUT_INVERT true
-#define DISPLAY_BACKLIGHT_INITIAL_LEVEL 1
+#define DISPLAY_BACKLIGHT_INITIAL_LEVEL 0
 
 // 双屏独立旋转配置 (GC9D01 160x160 圆形屏)
 // 统一 MV=0 (swap_xy=false)，通过 mirror 组合实现不同方向
