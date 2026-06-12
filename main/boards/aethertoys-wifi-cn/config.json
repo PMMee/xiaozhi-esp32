@@ -4,7 +4,9 @@
         {
             "name": "aethertoys-wifi-cn",
             "sdkconfig_append": [
-                "CONFIG_USE_EMOTE_MESSAGE_STYLE=y"
+                "CONFIG_USE_EMOTE_MESSAGE_STYLE=y",
+                "CONFIG_SPIRAM_TRY_ALLOCATE_WIFI_LWIP=y",
+                "CONFIG_LWIP_TCPIP_RECVMBOX_SIZE=32"
             ]
         }
     ]
