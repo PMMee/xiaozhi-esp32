@@ -66,6 +66,17 @@ public:
 
     DeviceState GetDeviceState() const { return state_machine_.GetState(); }
     bool IsVoiceDetected() const { return audio_service_.IsVoiceDetected(); }
+
+    /**
+     * Register a state change listener
+     * @return listener id for removal
+     */
+    int AddStateChangeListener(std::function<void(DeviceState, DeviceState)> callback) {
+        return state_machine_.AddStateChangeListener(std::move(callback));
+    }
+    void RemoveStateChangeListener(int listener_id) {
+        state_machine_.RemoveStateChangeListener(listener_id);
+    }
     
     /**
      * Request state transition

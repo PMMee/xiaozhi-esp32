@@ -59,6 +59,10 @@ public:
     void SetHideSubtitle(bool hide);
     // 只显示表情模式：隐藏状态栏/时间/聊天消息
     void SetEmoteOnlyMode(bool emote_only);
+    // 将顶部状态图标的半透明白底设为全透明
+    void SetTopBarTransparent();
+    // 清空 status_label_ 文字
+    void ClearStatus();
 
     // 重写：表情模式下跳过状态/通知
     virtual void SetStatus(const char* status) override;

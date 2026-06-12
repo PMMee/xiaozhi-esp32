@@ -1340,9 +1340,38 @@ void LcdDisplay::SetEmoteOnlyMode(bool emote_only) {
     }
 }
 
+void LcdDisplay::SetTopBarTransparent() {
+    DisplayLockGuard lock(this);
+    // 隐藏顶部两个 bar，把 status_label_ 提到 screen 层独立显示
+    if (top_bar_ != nullptr) {
+        lv_obj_add_flag(top_bar_, LV_OBJ_FLAG_HIDDEN);
+    }
+    if (status_bar_ != nullptr) {
+        lv_obj_add_flag(status_bar_, LV_OBJ_FLAG_HIDDEN);
+        // 把 status_label_ 从 status_bar_ 移到 screen，避免被隐藏
+        if (status_label_ != nullptr) {
+            lv_obj_set_parent(status_label_, lv_screen_active());
+            lv_obj_align(status_label_, LV_ALIGN_TOP_MID, 0, 4);
+        }
+        if (notification_label_ != nullptr) {
+            lv_obj_set_parent(notification_label_, lv_screen_active());
+            lv_obj_align(notification_label_, LV_ALIGN_TOP_MID, 0, 4);
+        }
+    }
+    ESP_LOGI(TAG, "Top bars hidden, labels reparented to screen");
+}
+
+void LcdDisplay::ClearStatus() {
+    DisplayLockGuard lock(this);
+    if (status_label_ != nullptr) {
+        lv_label_set_text(status_label_, "");
+        ESP_LOGI(TAG, "Status label cleared");
+    }
+}
+
 void LcdDisplay::SetStatus(const char* status) {
     if (emote_only_) return;  // 表情模式：跳过状态文字
-    LvglDisplay::SetStatus(status);
+    // LvglDisplay::SetStatus(status);
 }
 
 void LcdDisplay::ShowNotification(const char* notification, int duration_ms) {

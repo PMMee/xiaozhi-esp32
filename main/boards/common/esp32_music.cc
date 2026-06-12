@@ -239,6 +239,9 @@ std::string Esp32Music::GetArtistName() const {
 // ---- 搜索 ----
 
 cJSON* Esp32Music::SearchMusicInternal(const std::string& song_name, const std::string& artist_name) {
+    // 确保 WiFi 处于高性能模式，避免因 ResetProtocol 异步将 WiFi 设为 LOW_POWER 导致 TCP 连接失败
+    Board::GetInstance().SetPowerSaveLevel(PowerSaveLevel::PERFORMANCE);
+
     std::string base_url = "http://shybot.top/v2/music/api/?shykey=6df7c755ae9f9fb598572b34194a8b060fb5fb611dcb20f783f1a7a9ea6937aa&type=qq";
     std::string full_url;
 

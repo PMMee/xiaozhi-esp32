@@ -55,6 +55,16 @@
 #define DISPLAY_RIGHT_MIRROR_X true
 #define DISPLAY_RIGHT_MIRROR_Y true
 
+// // 左屏：逆时针旋转90°（即 90°）
+// #define DISPLAY_LEFT_SWAP_XY   true
+// #define DISPLAY_LEFT_MIRROR_X  false
+// #define DISPLAY_LEFT_MIRROR_Y  true
+
+// // 右屏：顺时针旋转90°（即 270°）
+// #define DISPLAY_RIGHT_SWAP_XY  true
+// #define DISPLAY_RIGHT_MIRROR_X true
+// #define DISPLAY_RIGHT_MIRROR_Y false
+
 // Display configuration for GC9D01
 //左屏
 #define DISPLAY_LEFT_SPI_CS_PIN    GPIO_NUM_8

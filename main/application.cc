@@ -67,11 +67,6 @@ void Application::Initialize() {
     auto display = board.GetDisplay();
     display->SetupUI();
 
-    // 只显示表情模式（无状态栏/时间）
-    if (auto* lcd = dynamic_cast<LcdDisplay*>(display)) {
-        lcd->SetEmoteOnlyMode(true);
-    }
-
     // Print board name/version info
     display->SetChatMessage("system", SystemInfo::GetUserAgent().c_str());
 
@@ -549,18 +544,18 @@ void Application::InitializeProtocol() {
                 auto text = cJSON_GetObjectItem(root, "text");
                 if (cJSON_IsString(text)) {
                     ESP_LOGI(TAG, "<< %s", text->valuestring);
-                    Schedule([display, message = std::string(text->valuestring)]() {
-                        display->SetChatMessage("assistant", message.c_str());
-                    });
+                    // Schedule([display, message = std::string(text->valuestring)]() {
+                    //     display->SetChatMessage("assistant", message.c_str());
+                    // });
                 }
             }
         } else if (strcmp(type->valuestring, "stt") == 0) {
             auto text = cJSON_GetObjectItem(root, "text");
             if (cJSON_IsString(text)) {
                 ESP_LOGI(TAG, ">> %s", text->valuestring);
-                Schedule([display, message = std::string(text->valuestring)]() {
-                    display->SetChatMessage("user", message.c_str());
-                });
+                // Schedule([display, message = std::string(text->valuestring)]() {
+                //     display->SetChatMessage("user", message.c_str());
+                // });
             }
         } else if (strcmp(type->valuestring, "llm") == 0) {
             auto emotion = cJSON_GetObjectItem(root, "emotion");
@@ -882,19 +877,22 @@ void Application::HandleStateChangedEvent() {
     switch (new_state) {
         case kDeviceStateUnknown:
         case kDeviceStateIdle:
-            display->SetStatus(Lang::Strings::STANDBY);
-            display->ClearChatMessages();  // Clear messages first
+            // display->SetStatus(Lang::Strings::STANDBY);
+            if (auto* lcd = dynamic_cast<LcdDisplay*>(display)) {
+                lcd->ClearStatus();  // 清空初始化阶段遗留的状态文字
+            }
+            // display->ClearChatMessages();  // Clear messages first
             display->SetEmotion("neutral"); // Then set emotion (wechat mode checks child count)
             audio_service_.EnableVoiceProcessing(false);
             audio_service_.EnableWakeWordDetection(true);
             break;
         case kDeviceStateConnecting:
-            display->SetStatus(Lang::Strings::CONNECTING);
+            // display->SetStatus(Lang::Strings::CONNECTING);
             display->SetEmotion("neutral");
-            display->SetChatMessage("system", "");
+            // display->SetChatMessage("system", "");
             break;
         case kDeviceStateListening:
-            display->SetStatus(Lang::Strings::LISTENING);
+            // display->SetStatus(Lang::Strings::LISTENING);
             display->SetEmotion("neutral");
 
             // Make sure the audio processor is running
@@ -925,7 +923,7 @@ void Application::HandleStateChangedEvent() {
             }
             break;
         case kDeviceStateSpeaking:
-            display->SetStatus(Lang::Strings::SPEAKING);
+            // display->SetStatus(Lang::Strings::SPEAKING);
 
             if (listening_mode_ != kListeningModeRealtime) {
                 audio_service_.EnableVoiceProcessing(false);
