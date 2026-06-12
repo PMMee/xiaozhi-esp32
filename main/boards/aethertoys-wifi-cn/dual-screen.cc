@@ -87,8 +87,8 @@ temperature_sensor_handle_t temp_sensor = NULL;
 
 namespace {
 
-static constexpr uint8_t kIdleBacklightBrightness = 15;
-static constexpr int64_t kIdleBacklightDelayUs = 30 * 1000 * 1000LL;
+static constexpr uint8_t kIdleBacklightBrightness = 10;
+static constexpr int64_t kIdleBacklightDelayUs = 20 * 1000 * 1000LL;
 static constexpr ledc_timer_t kDualBacklightTimer = LEDC_TIMER_2;
 static constexpr ledc_channel_t kLeftBacklightChannel = LEDC_CHANNEL_2;
 static constexpr ledc_channel_t kRightBacklightChannel = LEDC_CHANNEL_3;

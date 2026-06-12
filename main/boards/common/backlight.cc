@@ -34,10 +34,10 @@ void Backlight::RestoreBrightness() {
     Settings settings("display");  
     int saved_brightness = settings.GetInt("brightness", 75);
     
-    // 检查亮度值是否为0或过小，设置默认值
-    if (saved_brightness <= 0) {
+    // 检查亮度值是否过小（低于最低限制 10%），设置默认值
+    if (saved_brightness < 10) {
         ESP_LOGW(TAG, "Brightness value (%d) is too small, setting to default (10)", saved_brightness);
-        saved_brightness = 10;  // 设置一个较低的默认值
+        saved_brightness = 10;
     }
     
     SetBrightness(saved_brightness);
@@ -46,6 +46,10 @@ void Backlight::RestoreBrightness() {
 void Backlight::SetBrightness(uint8_t brightness, bool permanent) {
     if (brightness > 100) {
         brightness = 100;
+    }
+    // 最低亮度限制 10%，防止屏幕完全黑掉无法操作
+    if (brightness < 10) {
+        brightness = 10;
     }
 
     if (brightness_ == brightness) {
