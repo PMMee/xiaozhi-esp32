@@ -317,6 +317,14 @@ void Application::HandleActivationDoneEvent() {
     board.SetPowerSaveLevel(PowerSaveLevel::LOW_POWER);
 
     Schedule([this]() {
+        // Play the network type prompt (4G or WiFi)
+        auto& board = Board::GetInstance();
+        std::string board_type = board.GetBoardType();
+        if (board_type == "ml307" || board_type == "nt26") {
+            audio_service_.PlaySound(Lang::Sounds::OGG_SPEAK_4G);
+        } else {
+            audio_service_.PlaySound(Lang::Sounds::OGG_SPEAK_WIFI);
+        }
         // Play the success sound to indicate the device is ready
         audio_service_.PlaySound(Lang::Sounds::OGG_SUCCESS);
     });
