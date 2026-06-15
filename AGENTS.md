@@ -84,6 +84,17 @@ Board  (boards/common/board.h)
 - **按键**: 使用 `Button` 类（`boards/common/button.h`），支持 Click/LongPress/DoubleClick
 - **分区表**: v2 版本使用 `partitions/v2/` 分区表，与 v1 不兼容
 
+### GC9D01 圆形屏驱动注意事项
+
+> 托管组件：`managed_components/espressif__esp_lcd_gc9d01/`，通过 `esp_lcd_new_panel_gc9d01()` 创建面板。
+
+- **SPI 时钟严格限制 ≤40 MHz**：GC9D01 数据手册标称最高 40 MHz，多数国产模组在 **27 MHz 以上即不稳定**。`GC9D01_PANEL_IO_SPI_CONFIG` 宏默认 40 MHz，**切勿**在 `pclk_hz` 中使用更高值（如 80 MHz），否则会导致数据传输出错 → 像素错位/噪点/画面发糊。
+- **硬件旋转通过 MADCTL (0x36) 寄存器实现**：使用 `esp_lcd_panel_swap_xy()` 设置 MV 位（行列交换），`esp_lcd_panel_mirror()` 设置 MX/MY 位（翻转）。LVGL 端设置 `.sw_rotate = 0` 禁用软件旋转。
+- **LVGL 端口会覆盖硬件 MADCTL**：`lvgl_port_add_disp()` 根据传入的 `rotation` 参数重新写入 MADCTL，覆盖之前的硬件旋转设置。如需面板独立旋转（如双屏异向），须在 `SpiLcdDisplay` 构造后重新调用 `esp_lcd_panel_swap_xy()` / `esp_lcd_panel_mirror()` 恢复硬件旋转。参考 `dual-screen.cc` 中的实现。
+- **BGR 颜色顺序由 `rgb_endian` 控制**：`panel_dev_config.rgb_endian = LCD_RGB_ENDIAN_RGB` 或 `LCD_RGB_ENDIAN_BGR`，写入 MADCTL 的 BGR 位。颜色顺序错误会导致文字彩边（视觉感知为模糊）。
+- **ML 位（垂直刷新方向）驱动未管理**：ESP-IDF GC9D01 驱动仅管理 MX/MY/MV/BGR 位，ML 位保持默认值。旋转 90°/270° 时若出现色彩发虚，可考虑通过自定义初始化命令序列（`gc9d01_vendor_config_t.init_cmds`）手动设置 ML 位。
+- **160x160 正方形屏旋转无需更新宽高**：但若移植到非正方形 GC9D01 模组（如 40x160 长条屏），旋转 90° 后必须同步交换 width/height 并更新 CASET/RASET 地址范围，否则画面压缩/拉伸导致严重模糊。
+
 ## 移植旧板型到 v2 的要点
 
 1. **I2C API 变化**: 旧版 `i2c_bus_create()` → 新版 `i2c_new_master_bus()`

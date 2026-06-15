@@ -87,8 +87,8 @@ temperature_sensor_handle_t temp_sensor = NULL;
 
 namespace {
 
-static constexpr uint8_t kIdleBacklightBrightness = 15;
-static constexpr int64_t kIdleBacklightDelayUs = 30 * 1000 * 1000LL;
+static constexpr uint8_t kIdleBacklightBrightness = 10;
+static constexpr int64_t kIdleBacklightDelayUs = 20 * 1000 * 1000LL;
 static constexpr ledc_timer_t kDualBacklightTimer = LEDC_TIMER_2;
 static constexpr ledc_channel_t kLeftBacklightChannel = LEDC_CHANNEL_2;
 static constexpr ledc_channel_t kRightBacklightChannel = LEDC_CHANNEL_3;
@@ -136,6 +136,11 @@ public:
 
     void SetBrightnessImpl(uint8_t brightness) override {
         uint32_t duty_cycle = (1023 * brightness) / 100;
+        // 硬件 output_invert 会反相输出，需要在软件层补偿，
+        // 否则 brightness 越大实际屏幕越暗
+        if (output_invert_) {
+            duty_cycle = 1023 - duty_cycle;
+        }
         UpdateChannel(kLeftBacklightChannel, left_pin_, duty_cycle);
         UpdateChannel(kRightBacklightChannel, right_pin_, duty_cycle);
     }
@@ -197,6 +202,7 @@ private:
     DualPwmBacklight* backlight_ = nullptr;
     esp_timer_handle_t idle_backlight_timer_ = nullptr;
     bool idle_backlight_dimmed_ = false;
+    int idle_backlight_listener_id_ = -1;
 
     bq27220_handle_t bq27220 = NULL;
     Music* music_ = nullptr;
@@ -269,7 +275,24 @@ private:
         };
         ESP_ERROR_CHECK(esp_timer_create(&timer_args, &idle_backlight_timer_));
 
-        // 空闲时启动背光调暗定时器
+        // 注册状态变化监听：进入 idle 时启动空闲调暗定时器，离开 idle 时恢复背光
+        idle_backlight_listener_id_ = Application::GetInstance().AddStateChangeListener(
+            [this](DeviceState old_state, DeviceState new_state) {
+                if (new_state == kDeviceStateIdle) {
+                    // 回到空闲状态，重新调度调暗定时器
+                    ScheduleIdleBacklightDim();
+                } else if (old_state == kDeviceStateIdle) {
+                    // 离开空闲状态（唤醒、开始对话等），恢复背光亮度
+                    if (idle_backlight_dimmed_) {
+                        RestoreBacklightFromSettings();
+                    } else {
+                        // 定时器还没触发，只是取消定时器即可
+                        StopIdleBacklightTimer();
+                    }
+                }
+            });
+
+        // 如果当前已经处于空闲状态，立即启动定时器
         if (Application::GetInstance().GetDeviceState() == kDeviceStateIdle) {
             ScheduleIdleBacklightDim();
         }

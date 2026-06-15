@@ -41,29 +41,29 @@
 #define DISPLAY_MIRROR_Y true
 #define DISPLAY_OFFSET_X  0
 #define DISPLAY_OFFSET_Y  0
-#define DISPLAY_BACKLIGHT_OUTPUT_INVERT true
+#define DISPLAY_BACKLIGHT_OUTPUT_INVERT false
 #define DISPLAY_BACKLIGHT_INITIAL_LEVEL 0
 
 // 双屏独立旋转配置 (GC9D01 160x160 圆形屏)
 // 统一 MV=0 (swap_xy=false)，通过 mirror 组合实现不同方向
-// 左屏：0° — 无旋转
-#define DISPLAY_LEFT_SWAP_XY  false
-#define DISPLAY_LEFT_MIRROR_X false
-#define DISPLAY_LEFT_MIRROR_Y false
-// 右屏：180° — mirror_x + mirror_y
-#define DISPLAY_RIGHT_SWAP_XY  false
-#define DISPLAY_RIGHT_MIRROR_X true
-#define DISPLAY_RIGHT_MIRROR_Y true
-
-// // 左屏：逆时针旋转90°（即 90°）
-// #define DISPLAY_LEFT_SWAP_XY   true
-// #define DISPLAY_LEFT_MIRROR_X  false
-// #define DISPLAY_LEFT_MIRROR_Y  true
-
-// // 右屏：顺时针旋转90°（即 270°）
-// #define DISPLAY_RIGHT_SWAP_XY  true
+// // 左屏：0° — 无旋转
+// #define DISPLAY_LEFT_SWAP_XY  false
+// #define DISPLAY_LEFT_MIRROR_X false
+// #define DISPLAY_LEFT_MIRROR_Y false
+// // 右屏：180° — mirror_x + mirror_y
+// #define DISPLAY_RIGHT_SWAP_XY  false
 // #define DISPLAY_RIGHT_MIRROR_X true
-// #define DISPLAY_RIGHT_MIRROR_Y false
+// #define DISPLAY_RIGHT_MIRROR_Y true
+
+// 左屏：逆时针旋转90°（即 90°）
+#define DISPLAY_LEFT_SWAP_XY   true
+#define DISPLAY_LEFT_MIRROR_X  false
+#define DISPLAY_LEFT_MIRROR_Y  true
+
+// 右屏：顺时针旋转90°（即 270°）
+#define DISPLAY_RIGHT_SWAP_XY  true
+#define DISPLAY_RIGHT_MIRROR_X true
+#define DISPLAY_RIGHT_MIRROR_Y false
 
 // Display configuration for GC9D01
 //左屏
@@ -72,7 +72,7 @@
 //右屏
 #define DISPLAY_RIGHT_SPI_CS_PIN   GPIO_NUM_9
 #define DISPLAY_RIGHT_BACKLIGHT_PIN GPIO_NUM_10
-#define LCD_SPI_PCLK_HZ          80000000
+#define LCD_SPI_PCLK_HZ          40000000
 
 
 // Battery monitoring configuration
