@@ -87,6 +87,15 @@ void WifiBoard::StartNetwork() {
 }
 
 void WifiBoard::TryWifiConnect() {
+    // Guard against re-entrancy: WifiManager::StartStation() unlocks the mutex
+    // during ConfigModeExit notification, which can trigger another TryWifiConnect()
+    // before station_active_ is set. This would cause duplicate netif creation → crash.
+    if (connect_in_progress_) {
+        ESP_LOGW(TAG, "TryWifiConnect called while already in progress, ignoring");
+        return;
+    }
+    connect_in_progress_ = true;
+
     auto& ssid_manager = SsidManager::GetInstance();
     bool have_ssid = !ssid_manager.GetSsidList().empty();
 
@@ -101,6 +110,8 @@ void WifiBoard::TryWifiConnect() {
         vTaskDelay(pdMS_TO_TICKS(1500));
         StartWifiConfigMode();
     }
+
+    connect_in_progress_ = false;
 }
 
 void WifiBoard::OnNetworkEvent(NetworkEvent event, const std::string& data) {
@@ -198,6 +209,17 @@ void WifiBoard::StartWifiConfigMode() {
 
 void WifiBoard::EnterWifiConfigMode() {
     ESP_LOGI(TAG, "EnterWifiConfigMode called");
+
+    auto& wifi_manager = WifiManager::GetInstance();
+
+    // Guard: if WifiManager is not yet initialized, ignore the request.
+    // This can happen during early boot due to false button triggers
+    // (e.g., strapping pin GPIO glitch before internal pull-up is enabled).
+    if (!wifi_manager.IsInitialized()) {
+        ESP_LOGW(TAG, "EnterWifiConfigMode called but WifiManager not initialized, ignoring");
+        return;
+    }
+
     GetDisplay()->ShowNotification(Lang::Strings::ENTERING_WIFI_CONFIG_MODE);
 
     auto& app = Application::GetInstance();

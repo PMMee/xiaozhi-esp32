@@ -19,6 +19,7 @@
 #include "esp_adc/adc_cali.h"
 #include "esp_adc/adc_cali_scheme.h"
 #include <driver/gpio.h>
+#include <esp_system.h>
 #include <atomic>
 
 //电源
@@ -593,14 +594,22 @@ private:
             RestoreBacklightFromSettings();
             app.WakeWordInvoke(Lang::Strings::HELLO_MY_FRIEND);
         });
-        boot_button_.OnLongPress([this]() {
-            ESP_LOGI(TAG, "Boot button long press, request network switch");
+        boot_button_.OnMultipleClick([this]() {
+            ESP_LOGI(TAG, "Boot button 4-click, request network switch");
             auto target_type = GetNetworkType() == NetworkType::WIFI ? NetworkType::ML307 : NetworkType::WIFI;
-            RequestNetworkSwitch(target_type, "button_long_press");
-        });
+            RequestNetworkSwitch(target_type, "button_4click");
+        }, 4);
         boot_button_.OnDoubleClick([this]() {
             auto& app = Application::GetInstance();
             ESP_LOGI(TAG, "Boot button double click, state=%d", app.GetDeviceState());
+
+            // 配网模式下双击重启设备
+            if (app.GetDeviceState() == kDeviceStateWifiConfiguring) {
+                ESP_LOGI(TAG, "Double click in wifi config mode, rebooting...");
+                esp_restart();
+                return;
+            }
+
             if (GetNetworkType() == NetworkType::WIFI) {
                 if (app.GetDeviceState() == kDeviceStateIdle || app.GetDeviceState() == kDeviceStateStarting || app.GetDeviceState() == kDeviceStateActivating) {
                     auto& wifi_board = static_cast<WifiBoard&>(GetCurrentBoard());
