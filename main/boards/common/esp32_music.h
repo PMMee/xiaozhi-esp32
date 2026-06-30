@@ -38,6 +38,17 @@ private:
     // ---- 搜索阶段 ----
     cJSON* SearchMusicInternal(const std::string& song_name, const std::string& artist_name);
 
+    // 搜索任务参数（在独立 FreeRTOS 任务中执行 HTTP 搜索，避免阻塞主事件循环）
+    struct SearchTaskArg {
+        Esp32Music* self;
+        std::string song_name;
+        std::string artist_name;
+        std::string result;
+        SemaphoreHandle_t done;
+        std::atomic<bool> consumed;
+    };
+    static void SearchTaskFunc(void* arg);
+
     // ---- 播放任务 ----
     struct MusicTaskArg {
         Esp32Music* self;
@@ -79,6 +90,10 @@ private:
     // 正在使用的 HTTP 连接（用于外部 abort）
     std::mutex http_mutex_;
     Http* active_http_{nullptr};
+
+    // 搜索任务并发保护
+    std::atomic<bool> search_task_running_{false};
+    static constexpr int kSearchTimeoutMs = 10000;  // 搜索硬超时（含 TCP 连接）
 
     static constexpr size_t kMp3ReadBufSize = 1024 * 8;
     static constexpr size_t kPcmOutBufSize  = 4608;  // 1152 * 2 * 2

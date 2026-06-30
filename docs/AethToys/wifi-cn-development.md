@@ -528,6 +528,21 @@ Music::Download(song_name, artist_name)
 - 如果设备正在说话 → 音乐排队，等待 TTS 播放完毕自动开始
 - 播放前自动 `StopStreaming()` 清理之前的音频流
 
+**`self.music.search` 异步执行与超时保护**:
+
+> 实现：`main/boards/common/esp32_music.cc` 的 `Esp32Music::Search()` / `SearchTaskFunc()`
+
+- **为何不能同步阻塞**：所有 MCP 工具回调都通过 `Application::Schedule()` 在**主事件循环**中执行（见 `mcp_server.cc` 的 `DoToolCall`）。主循环同时负责处理 `MAIN_EVENT_WAKE_WORD_DETECTED` 等事件位。若搜索同步做 HTTP 往返，一旦 TCP 连接卡死，唤醒词事件无法被处理 → 设备"叫不答应"。
+- **`self.music.play` 不受影响**：`Start()` 只创建 FreeRTOS 任务后立即返回，搜索/下载/解码/播放全部在任务里异步跑。
+- **搜索的超时机制**：
+  - `Search()` 创建独立任务 `music_search`（栈 8KB，优先级 5）执行 `SearchMusicInternal()`
+  - 主循环用 `xSemaphoreTake(done, 10s)` 等待结果；**超时立即返回** `{"success":false,"message":"搜索超时，请稍后再试"}`，主循环释放，唤醒词恢复响应
+  - 超时时主循环会调 `active_http_->Close()` 中断卡死的 HTTP 连接，帮助搜索任务尽快退出
+  - HTTP 自身 `SetTimeout(8000)`（`ReadAll` 受此约束，但 `Open` 的底层 `tcp_->Connect()` **不受** `SetTimeout` 约束，这是 10s 硬超时的兜底必要原因）
+- **并发保护**：`search_task_running_` 原子标志防止并发搜索；若上一个搜索未结束，直接返回"正在搜索中，请稍候"
+- **资源回收**：搜索任务在 `xSemaphoreGive` 后最多等 500ms 主线程取结果，然后自行 `delete` arg 并 `vTaskDelete(nullptr)`
+- **已知局限**：若 `tcp_->Connect()` 真的永久阻塞且 `Close()` 无法中断，搜索任务栈（8KB）会泄漏，但主循环已不被阻塞，设备仍可响应唤醒词。彻底修需要让 `HttpClient::Open` 的 connect 也受 timeout 约束（属 `managed_components/78__esp-ml307` 范畴）
+
 **搜索返回格式**:
 
 ```json
@@ -710,6 +725,19 @@ AlarmManager: Failed to start alarm music, fallback to alarm.ogg
 **原因**: 音乐 PCM 和 TTS PCM 共享同一 `AudioOutputTask` 输出通路
 
 **解决**: 播放音乐前确保 `SwitchToIdle()` 完成，`StopStreaming()` 清理缓冲区。
+
+#### Q6: 搜索音乐时唤醒词无响应（卡在 self.music.search）
+
+**现象**: AI 调用 `self.music.search` 后，设备卡死，唤醒词叫不应，需重启
+
+**根因**: MCP 工具回调跑在主事件循环（`app.Schedule`），同步搜索的 HTTP 往返阻塞主循环 → `MAIN_EVENT_WAKE_WORD_DETECTED` 无法处理。`HttpClient::Open()` 的 `tcp_->Connect()` 不受 `SetTimeout` 约束，DNS/TCP 握手可无限阻塞。
+
+**修复**: `Esp32Music::Search()` 改为在独立 FreeRTOS 任务 `music_search` 中执行 HTTP 搜索，主循环用 `xSemaphoreTake(done, 10s)` 带硬超时等待。超时立即返回"搜索超时"并调 `active_http_->Close()` 中断连接，主循环释放，唤醒词恢复。详见 §4.3。
+
+**日志特征**:
+```
+[SEARCH] Timed out after 10000ms, aborting HTTP
+```
 
 ### 调试技巧
 

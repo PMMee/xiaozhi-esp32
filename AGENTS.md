@@ -103,6 +103,15 @@ Board  (boards/common/board.h)
 4. **BoxAudioCodec**: 构造函数参数需要 `i2c_master_bus_handle_t` (void*) 而非旧版 i2c_bus_handle_t
 5. **外部组件**: qmi8658 (IMU)、bq27220 (电量)、ws2812b (RGB灯) 等可能需要从旧项目复制或使用 managed_components
 
+## MCP 工具回调线程模型（易踩坑）
+
+> 关键：所有 MCP 工具回调都跑在**主事件循环**里，不是独立线程。
+
+- **机制**：`McpServer::DoToolCall()` (`main/mcp_server.cc`) 通过 `Application::Schedule(...)` 把工具回调投递到 `main_tasks_`，由 `Application::Run()` 的 while 循环串行执行（`application.cc` 的 `MAIN_EVENT_SCHEDULE` 分支）。
+- **同一个循环还处理**：`MAIN_EVENT_WAKE_WORD_DETECTED`、`MAIN_EVENT_SEND_AUDIO`、`MAIN_EVENT_VAD_CHANGE` 等。**回调一旦阻塞，唤醒词、音频发送全部停摆**。
+- **任何长耗时操作（HTTP 往返、磁盘 IO、长循环）禁止直接写在 MCP 回调里**。正确做法：回调中创建 FreeRTOS 任务异步执行，回调本身立即返回（参考 `Esp32Music::Start()`）。如需同步返回结果，用 `xSemaphoreTake` 带**硬超时**等待任务（参考 `Esp32Music::Search()` 的 10s 超时实现）。
+- **HttpClient 超时陷阱**：`SetTimeout(ms)` 只约束 `ReadAll()`/`Read()`/`GetStatusCode()`，**不约束** `Open()` 里的 `tcp_->Connect()`。connect 握手可无限阻塞，必须靠外层硬超时兜底。
+
 ## 相关文档
 
 - [自定义板型开发](docs/custom-board_zh.md)
