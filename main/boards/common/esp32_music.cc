@@ -20,6 +20,7 @@ extern "C" {
 
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
+#include <freertos/semphr.h>
 #include <mbedtls/sha256.h>
 
 #define TAG "Esp32Music"
@@ -198,32 +199,103 @@ bool Esp32Music::IsPlaying() const {
 }
 
 std::string Esp32Music::Search(const std::string& song_name, const std::string& artist_name) {
-    cJSON* response_json = SearchMusicInternal(song_name, artist_name);
-    if (!response_json) {
-        return "{\"success\": false, \"message\": \"搜索失败\"}";
+    // 防止并发搜索（上一个搜索任务仍在运行）
+    if (search_task_running_.load()) {
+        return "{\"success\": false, \"message\": \"正在搜索中，请稍候\"}";
     }
 
-    cJSON* result = cJSON_CreateObject();
-    cJSON_AddBoolToObject(result, "success", true);
+    search_task_running_.store(true);
 
-    cJSON* results_array = cJSON_AddArrayToObject(result, "results");
-    if (cJSON_IsArray(response_json)) {
-        int count = cJSON_GetArraySize(response_json);
-        int max_results = (count > 5) ? 5 : count;
-        for (int i = 0; i < max_results; i++) {
-            cJSON* item = cJSON_GetArrayItem(response_json, i);
-            if (item) {
-                cJSON_AddItemToArray(results_array, cJSON_Duplicate(item, 1));
-            }
+    auto* arg = new SearchTaskArg{};
+    arg->self = this;
+    arg->song_name = song_name;
+    arg->artist_name = artist_name;
+    arg->done = xSemaphoreCreateBinary();
+    arg->consumed.store(false);
+
+    TaskHandle_t search_task = nullptr;
+    BaseType_t ret = xTaskCreatePinnedToCore(
+        SearchTaskFunc,
+        "music_search",
+        8192,
+        arg,
+        5,
+        &search_task,
+        tskNO_AFFINITY);
+
+    if (ret != pdPASS) {
+        ESP_LOGE(TAG, "Failed to create search task");
+        vSemaphoreDelete(arg->done);
+        delete arg;
+        search_task_running_.store(false);
+        return "{\"success\": false, \"message\": \"创建搜索任务失败\"}";
+    }
+
+    // 在主事件循环中等待结果，但设置硬超时，避免 TCP 连接卡死导致主循环死锁
+    // 超时后主循环立即释放，唤醒词可恢复响应
+    if (xSemaphoreTake(arg->done, pdMS_TO_TICKS(kSearchTimeoutMs)) == pdTRUE) {
+        // 搜索完成，复制结果
+        std::string result = std::move(arg->result);
+        arg->consumed.store(true);  // 通知搜索任务可以回收 arg
+        // arg 由 SearchTaskFunc 负责释放
+        return result;
+    }
+
+    // 超时：尝试中断 HTTP 连接，帮助搜索任务尽快退出
+    ESP_LOGW(TAG, "[SEARCH] Timed out after %dms, aborting HTTP", kSearchTimeoutMs);
+    {
+        std::lock_guard<std::mutex> lock(http_mutex_);
+        if (active_http_) {
+            active_http_->Close();
+            active_http_ = nullptr;
         }
     }
+    // arg 由 SearchTaskFunc 超时后自行释放，此处不 delete（避免 use-after-free）
+    return "{\"success\": false, \"message\": \"搜索超时，请稍后再试\"}";
+}
 
-    cJSON_Delete(response_json);
-    char* json_str = cJSON_PrintUnformatted(result);
-    std::string ret(json_str);
-    cJSON_free(json_str);
-    cJSON_Delete(result);
-    return ret;
+void Esp32Music::SearchTaskFunc(void* arg) {
+    auto* task_arg = static_cast<SearchTaskArg*>(arg);
+    Esp32Music* self = task_arg->self;
+
+    cJSON* response_json = self->SearchMusicInternal(task_arg->song_name, task_arg->artist_name);
+    if (!response_json) {
+        task_arg->result = "{\"success\": false, \"message\": \"搜索失败\"}";
+    } else {
+        cJSON* result = cJSON_CreateObject();
+        cJSON_AddBoolToObject(result, "success", true);
+        cJSON* results_array = cJSON_AddArrayToObject(result, "results");
+        if (cJSON_IsArray(response_json)) {
+            int count = cJSON_GetArraySize(response_json);
+            int max_results = (count > 5) ? 5 : count;
+            for (int i = 0; i < max_results; i++) {
+                cJSON* item = cJSON_GetArrayItem(response_json, i);
+                if (item) {
+                    cJSON_AddItemToArray(results_array, cJSON_Duplicate(item, 1));
+                }
+            }
+        }
+        cJSON_Delete(response_json);
+        char* json_str = cJSON_PrintUnformatted(result);
+        task_arg->result = json_str;
+        cJSON_free(json_str);
+        cJSON_Delete(result);
+    }
+
+    // 通知主线程结果就绪
+    xSemaphoreGive(task_arg->done);
+
+    // 等待主线程取走结果（最多等待 500ms），然后释放 arg
+    int wait_ms = 0;
+    while (!task_arg->consumed.load() && wait_ms < 500) {
+        vTaskDelay(pdMS_TO_TICKS(10));
+        wait_ms += 10;
+    }
+
+    vSemaphoreDelete(task_arg->done);
+    self->search_task_running_.store(false);
+    delete task_arg;
+    vTaskDelete(nullptr);
 }
 
 std::string Esp32Music::GetSongName() const {
@@ -258,7 +330,13 @@ cJSON* Esp32Music::SearchMusicInternal(const std::string& song_name, const std::
         return nullptr;
     }
 
-    http->SetTimeout(10000);
+    // 记录活跃 HTTP 句柄，供超时中断使用
+    {
+        std::lock_guard<std::mutex> lock(http_mutex_);
+        active_http_ = http.get();
+    }
+
+    http->SetTimeout(8000);
     http->SetHeader("User-Agent", "ESP32-Music-Player/1.0");
     http->SetHeader("Accept", "application/json");
     add_auth_headers(http.get());
@@ -268,6 +346,8 @@ cJSON* Esp32Music::SearchMusicInternal(const std::string& song_name, const std::
 
     if (!http->Open("GET", full_url)) {
         ESP_LOGE(TAG, "[SEARCH] Failed to connect to music API");
+        std::lock_guard<std::mutex> lock(http_mutex_);
+        active_http_ = nullptr;
         return nullptr;
     }
 
@@ -276,11 +356,17 @@ cJSON* Esp32Music::SearchMusicInternal(const std::string& song_name, const std::
     if (status_code != 200) {
         ESP_LOGE(TAG, "[SEARCH] HTTP GET failed: %d", status_code);
         http->Close();
+        std::lock_guard<std::mutex> lock(http_mutex_);
+        active_http_ = nullptr;
         return nullptr;
     }
 
     std::string response_data = http->ReadAll();
     http->Close();
+    {
+        std::lock_guard<std::mutex> lock(http_mutex_);
+        active_http_ = nullptr;
+    }
 
     ESP_LOGI(TAG, "[SEARCH] Response size: %d bytes", (int)response_data.size());
     if (response_data.empty()) {
