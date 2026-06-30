@@ -646,7 +646,7 @@ private:
 
         ESP_LOGI(TAG, "Install GC9D01 panel driver");
         esp_lcd_panel_dev_config_t panel_config = {};
-        panel_config.reset_gpio_num = DISPLAY_SPI_RESET_PIN;
+        panel_config.reset_gpio_num = DISPLAY_LEFT_SPI_RESET_PIN;
         panel_config.rgb_ele_order = LCD_RGB_ELEMENT_ORDER_RGB;
         panel_config.bits_per_pixel = 16;
         ESP_ERROR_CHECK(esp_lcd_new_panel_gc9d01(panel_io, &panel_config, &panel));
@@ -678,7 +678,7 @@ private:
 
         esp_lcd_panel_handle_t panel_handle1 = NULL;
         esp_lcd_panel_dev_config_t panel_config1 = {};
-        panel_config1.reset_gpio_num = DISPLAY_SPI_RESET_PIN; // Uses shared RST
+        panel_config1.reset_gpio_num = DISPLAY_LEFT_SPI_RESET_PIN; // 左屏独立 RST
         panel_config1.rgb_endian = LCD_RGB_ENDIAN_RGB;
         panel_config1.rgb_ele_order = LCD_RGB_ELEMENT_ORDER_RGB;
         panel_config1.bits_per_pixel = 16;
@@ -693,14 +693,14 @@ private:
 
         esp_lcd_panel_handle_t panel_handle2 = NULL;
         esp_lcd_panel_dev_config_t panel_config2 = {};
-        panel_config2.reset_gpio_num = GPIO_NUM_NC; // Don't reset shared pin again
+        panel_config2.reset_gpio_num = DISPLAY_RIGHT_SPI_RESET_PIN; // 右屏独立 RST
         panel_config2.rgb_endian = LCD_RGB_ENDIAN_RGB;
         panel_config2.rgb_ele_order = LCD_RGB_ELEMENT_ORDER_RGB;
         panel_config2.bits_per_pixel = 16;
         ESP_ERROR_CHECK(esp_lcd_new_panel_gc9d01(io_handle2, &panel_config2, &panel_handle2));
 
         // Init Panel 1 (左屏: 左转90° CCW)
-        ESP_ERROR_CHECK(esp_lcd_panel_reset(panel_handle1)); // This resets both if shared
+        ESP_ERROR_CHECK(esp_lcd_panel_reset(panel_handle1)); // 左屏独立 RST 复位
         vTaskDelay(pdMS_TO_TICKS(20));
         ESP_ERROR_CHECK(esp_lcd_panel_init(panel_handle1));
         vTaskDelay(pdMS_TO_TICKS(20));
@@ -710,6 +710,7 @@ private:
         ESP_ERROR_CHECK(esp_lcd_panel_disp_on_off(panel_handle1, true));
 
         // Init Panel 2 (右屏: 右转180°)
+        ESP_ERROR_CHECK(esp_lcd_panel_reset(panel_handle2)); // 右屏独立 RST，单独复位
         vTaskDelay(pdMS_TO_TICKS(20));
         ESP_ERROR_CHECK(esp_lcd_panel_init(panel_handle2));
         vTaskDelay(pdMS_TO_TICKS(20));
@@ -727,7 +728,7 @@ private:
         dual_display_[1] = dual_display_[0];
 
         // 重新应用硬件旋转（lvgl_port_add_disp 会用 LVGL 旋转覆盖硬件设置）
-        // 注意：这是最后一次使用 io_handle2，之后 GPIO9 将永久拉低
+        // 注意：这是最后一次使用 io_handle2，之后右屏 CS 将永久拉低
         esp_lcd_panel_swap_xy(panel_handle1, DISPLAY_LEFT_SWAP_XY);
         esp_lcd_panel_mirror(panel_handle1, DISPLAY_LEFT_MIRROR_X, DISPLAY_LEFT_MIRROR_Y);
         esp_lcd_panel_swap_xy(panel_handle2, DISPLAY_RIGHT_SWAP_XY);
@@ -742,7 +743,7 @@ private:
             lv_display_set_flush_cb(lv_disp, dual_flush_cb);
         }
 
-        // 初始化完成后，永久拉低右屏 CS (GPIO9)
+        // 初始化完成后，永久拉低右屏 CS (DISPLAY_RIGHT_SPI_CS_PIN)
         // GC9D01 无 MISO 回读，两个 CS 同时低电平 → 所有 SPI 数据两个面板同时接收
         gpio_config_t right_cs_cfg = {
             .pin_bit_mask = (1ULL << DISPLAY_RIGHT_SPI_CS_PIN),

@@ -6,10 +6,10 @@
 #define AUDIO_INPUT_SAMPLE_RATE  24000
 #define AUDIO_OUTPUT_SAMPLE_RATE 24000
 
-#define AUDIO_I2S_GPIO_MCLK      GPIO_NUM_1
+#define AUDIO_I2S_GPIO_MCLK      GPIO_NUM_2
 #define AUDIO_I2S_GPIO_WS        GPIO_NUM_44
 #define AUDIO_I2S_GPIO_BCLK      GPIO_NUM_42
-#define AUDIO_I2S_GPIO_DIN       GPIO_NUM_2
+#define AUDIO_I2S_GPIO_DIN       GPIO_NUM_1
 #define AUDIO_I2S_GPIO_DOUT      GPIO_NUM_43
 
 #define AUDIO_CODEC_PA_PIN       GPIO_NUM_15
@@ -33,17 +33,14 @@
 #define DISPLAY_WIDTH   160
 #define DISPLAY_HEIGHT  160
 
-// #define DISPLAY_SPI_SCLK_PIN    GPIO_NUM_16
-// #define DISPLAY_SPI_MOSI_PIN    GPIO_NUM_17
+#define DISPLAY_SPI_SCLK_PIN    GPIO_NUM_11  // SCL
+#define DISPLAY_SPI_MOSI_PIN    GPIO_NUM_12  // SDA
 
-// #define DISPLAY_SPI_DC_PIN      GPIO_NUM_18
-// #define DISPLAY_SPI_RESET_PIN   GPIO_NUM_3
+#define DISPLAY_SPI_DC_PIN      GPIO_NUM_10  // D/C
 
-#define DISPLAY_SPI_SCLK_PIN    GPIO_NUM_18
-#define DISPLAY_SPI_MOSI_PIN    GPIO_NUM_17
-
-#define DISPLAY_SPI_DC_PIN      GPIO_NUM_3
-#define DISPLAY_SPI_RESET_PIN   GPIO_NUM_16
+// 双屏独立 RST 引脚（新硬件：左右屏各有独立复位脚）
+#define DISPLAY_LEFT_SPI_RESET_PIN   GPIO_NUM_3   // RST_L
+#define DISPLAY_RIGHT_SPI_RESET_PIN  GPIO_NUM_8  // RST_R
 
 #define DISPLAY_SWAP_XY  true
 #define DISPLAY_MIRROR_X false
@@ -55,32 +52,32 @@
 
 // 双屏独立旋转配置 (GC9D01 160x160 圆形屏)
 // 统一 MV=0 (swap_xy=false)，通过 mirror 组合实现不同方向
-// // 左屏：0° — 无旋转
-// #define DISPLAY_LEFT_SWAP_XY  false
-// #define DISPLAY_LEFT_MIRROR_X false
-// #define DISPLAY_LEFT_MIRROR_Y false
-// // 右屏：180° — mirror_x + mirror_y
-// #define DISPLAY_RIGHT_SWAP_XY  false
-// #define DISPLAY_RIGHT_MIRROR_X true
-// #define DISPLAY_RIGHT_MIRROR_Y true
-
-// 左屏：逆时针旋转90°（即 90°）
-#define DISPLAY_LEFT_SWAP_XY   true
-#define DISPLAY_LEFT_MIRROR_X  false
-#define DISPLAY_LEFT_MIRROR_Y  true
-
-// 右屏：顺时针旋转90°（即 270°）
-#define DISPLAY_RIGHT_SWAP_XY  true
-#define DISPLAY_RIGHT_MIRROR_X true
+// 左屏：0° — 无旋转
+#define DISPLAY_LEFT_SWAP_XY  false
+#define DISPLAY_LEFT_MIRROR_X true
+#define DISPLAY_LEFT_MIRROR_Y true
+// 右屏：180° — mirror_x + mirror_y
+#define DISPLAY_RIGHT_SWAP_XY  false
+#define DISPLAY_RIGHT_MIRROR_X false
 #define DISPLAY_RIGHT_MIRROR_Y false
+
+// // 左屏：逆时针旋转90°（即 90°）
+// #define DISPLAY_LEFT_SWAP_XY   true
+// #define DISPLAY_LEFT_MIRROR_X  false
+// #define DISPLAY_LEFT_MIRROR_Y  true
+
+// // 右屏：顺时针旋转90°（即 270°）
+// #define DISPLAY_RIGHT_SWAP_XY  true
+// #define DISPLAY_RIGHT_MIRROR_X true
+// #define DISPLAY_RIGHT_MIRROR_Y false
 
 // Display configuration for GC9D01
 //左屏
-#define DISPLAY_LEFT_SPI_CS_PIN    GPIO_NUM_8
-#define DISPLAY_LEFT_BACKLIGHT_PIN GPIO_NUM_46
+#define DISPLAY_LEFT_SPI_CS_PIN    GPIO_NUM_9   // CS_L
+#define DISPLAY_LEFT_BACKLIGHT_PIN GPIO_NUM_18   // LED_k (双屏共用单路背光)
 //右屏
-#define DISPLAY_RIGHT_SPI_CS_PIN   GPIO_NUM_9
-#define DISPLAY_RIGHT_BACKLIGHT_PIN GPIO_NUM_10
+#define DISPLAY_RIGHT_SPI_CS_PIN   GPIO_NUM_46  // CS_R
+#define DISPLAY_RIGHT_BACKLIGHT_PIN GPIO_NUM_NC // 新硬件仅一路背光 LED，右路置 NC
 #define LCD_SPI_PCLK_HZ          40000000
 
 

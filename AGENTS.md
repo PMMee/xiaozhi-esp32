@@ -95,6 +95,17 @@ Board  (boards/common/board.h)
 - **ML 位（垂直刷新方向）驱动未管理**：ESP-IDF GC9D01 驱动仅管理 MX/MY/MV/BGR 位，ML 位保持默认值。旋转 90°/270° 时若出现色彩发虚，可考虑通过自定义初始化命令序列（`gc9d01_vendor_config_t.init_cmds`）手动设置 ML 位。
 - **160x160 正方形屏旋转无需更新宽高**：但若移植到非正方形 GC9D01 模组（如 40x160 长条屏），旋转 90° 后必须同步交换 width/height 并更新 CASET/RASET 地址范围，否则画面压缩/拉伸导致严重模糊。
 
+### 双屏镜像架构 (aethertoys-wifi-cn)
+
+> 实现：`main/boards/aethertoys-wifi-cn/dual-screen.cc`，引脚表见 `config.h` 与 [docs/AethToys/wifi-cn-development.md](docs/AethToys/wifi-cn-development.md)。
+
+- **单 LVGL 实例驱动两块 GC9D01**：两块屏挂在同一条 SPI2_HOST 总线上，共享 SCLK/MOSI/DC，仅 CS 与 RST 独立。
+- **镜像原理**：初始化完成后，右屏 CS (`DISPLAY_RIGHT_SPI_CS_PIN`) 被永久拉低。GC9D01 无 MISO 回读，因此左屏 CS 由 panel_io 正常 toggle、右屏 CS 常低 → 每次 SPI 写入两块屏同时接收相同数据。`dual_flush_cb` 只对 primary (左) 面板调用 `esp_lcd_panel_draw_bitmap`，右屏被动镜像。
+- **双屏独立 RST（新硬件）**：左右屏各有独立复位脚 `DISPLAY_LEFT_SPI_RESET_PIN` / `DISPLAY_RIGHT_SPI_RESET_PIN`。`IntializeDualScreen()` 必须对两块面板分别调用 `esp_lcd_panel_reset()` + `esp_lcd_panel_init()`，**不要**再把右屏 reset 设为 `GPIO_NUM_NC`。
+- **单路背光**：新硬件仅一路背光 LED（`DISPLAY_LEFT_BACKLIGHT_PIN = GPIO8`），右路 `DISPLAY_RIGHT_BACKLIGHT_PIN = GPIO_NUM_NC`。`DualPwmBacklight` 自动跳过 NC 通道，仍用单一 LEDC 通道调光。
+- **硬件旋转在 `SpiLcdDisplay` 构造后需重新应用**：`lvgl_port_add_disp()` 会用 LVGL 的 rotation 参数覆盖 MADCTL，故双屏异向旋转须在构造后再调 `esp_lcd_panel_swap_xy()` / `esp_lcd_panel_mirror()` 恢复（见 `IntializeDualScreen()` 末尾）。
+- **`InitializeDisplay()` 为单屏遗留代码，构造函数不调用**：仅 `IntializeDualScreen()` 生效；改屏时以双屏路径为准。
+
 ## 移植旧板型到 v2 的要点
 
 1. **I2C API 变化**: 旧版 `i2c_bus_create()` → 新版 `i2c_new_master_bus()`
