@@ -26,6 +26,13 @@ public:
     Esp32Music();
     virtual ~Esp32Music();
 
+    // 播放结束原因
+    enum class EndReason {
+        Normal,            // 正常播放到 EOF
+        Stopped,           // 用户主动停止（按键/唤醒词中断/MCP stop）
+        Error,             // 网络错误 / 超时 / 重试耗尽
+    };
+
     // Music interface
     virtual bool Start(const std::string& song_name, const std::string& artist_name = "") override;
     virtual void Stop() override;
@@ -73,6 +80,7 @@ private:
     std::string current_music_url_;
     std::atomic<bool> playing_{false};
     std::atomic<bool> stop_requested_{false};
+    EndReason end_reason_{EndReason::Normal};  // 本次播放结束原因
 
     TaskHandle_t music_task_handle_{nullptr};
 

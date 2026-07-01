@@ -132,7 +132,19 @@ public:
      * This includes closing audio channel, resetting protocol and ota objects
      */
     void ResetProtocol();
-    void Reconnect();
+    void Reconnect(const std::string& wake_word_message = "音乐播放完毕");
+
+    /**
+     * 暂停语音通道（保留 MQTT 连接）
+     * 用于音乐播放前断开音频，避免销毁整个 MQTT 协议栈
+     */
+    void SuspendAudioChannel();
+
+    /**
+     * 恢复语音通道（复用现有 MQTT 连接）
+     * 用于音乐播放后恢复音频，比 Reconnect() 更快更稳定
+     */
+    void ResumeAudioChannel(const std::string& wake_word_message);
 
 private:
     Application();

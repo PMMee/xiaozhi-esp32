@@ -25,6 +25,18 @@ extern "C" {
 
 #define TAG "Esp32Music"
 
+// ---- 音乐源配置 ----
+// 可选: qq(QQ音乐) | wyy(网易云) | kg(酷狗) | kw(酷我)
+// 不同源的 CDN 对 ESP32 的速度差异很大，QQ 音乐 CDN 实测 ~8KB/s
+// 如遇卡顿可切换尝试
+#define MUSIC_SOURCE_TYPE "kw"
+// ---- 调试开关 (取消注释以启用详细网络日志) ----
+// #define MUSIC_STREAM_DEBUG
+
+#ifdef MUSIC_STREAM_DEBUG
+#include <esp_wifi.h>
+#endif
+
 // ---- 认证头（与 shybot.top API 的 ESP32 动态密钥，旧版代码一致） ----
 
 static void add_auth_headers(Http* http) {
@@ -164,8 +176,9 @@ void Esp32Music::Stop() {
 
     ESP_LOGI(TAG, "Stopping music playback");
     stop_requested_.store(true);
+    end_reason_ = EndReason::Stopped;
 
-    // 中断 HTTP 连接
+    // 中断 HTTP 连接（让流式读取立即返回，加速任务退出）
     {
         std::lock_guard<std::mutex> lock(http_mutex_);
         if (active_http_) {
@@ -174,24 +187,8 @@ void Esp32Music::Stop() {
         }
     }
 
-    // 等待任务退出（最多 2 秒）
-    if (music_task_handle_) {
-        TaskHandle_t task = music_task_handle_;
-        music_task_handle_ = nullptr;
-
-        int wait_ms = 0;
-        while (eTaskGetState(task) != eDeleted && wait_ms < 2000) {
-            vTaskDelay(pdMS_TO_TICKS(50));
-            wait_ms += 50;
-        }
-        if (eTaskGetState(task) != eDeleted) {
-            vTaskDelete(task);
-        }
-    }
-
-    CleanupMp3Decoder();
-    playing_.store(false);
-    stop_requested_.store(false);
+    // 不在这里等待任务退出 — Stop() 可能被主事件循环同步调用，
+    // 阻塞主循环会导致其他事件无法处理。cleanup 由任务的 exit_task 回调负责。
 }
 
 bool Esp32Music::IsPlaying() const {
@@ -314,7 +311,7 @@ cJSON* Esp32Music::SearchMusicInternal(const std::string& song_name, const std::
     // 确保 WiFi 处于高性能模式，避免因 ResetProtocol 异步将 WiFi 设为 LOW_POWER 导致 TCP 连接失败
     Board::GetInstance().SetPowerSaveLevel(PowerSaveLevel::PERFORMANCE);
 
-    std::string base_url = "http://shybot.top/v2/music/api/?shykey=6df7c755ae9f9fb598572b34194a8b060fb5fb611dcb20f783f1a7a9ea6937aa&type=qq";
+    std::string base_url = "http://shybot.top/v2/music/api/?shykey=6df7c755ae9f9fb598572b34194a8b060fb5fb611dcb20f783f1a7a9ea6937aa&type=" MUSIC_SOURCE_TYPE;
     std::string full_url;
 
     if (!song_name.empty()) {
@@ -341,7 +338,7 @@ cJSON* Esp32Music::SearchMusicInternal(const std::string& song_name, const std::
     http->SetHeader("Accept", "application/json");
     add_auth_headers(http.get());
 
-    ESP_LOGI(TAG, "[SEARCH] URL: %s", full_url.c_str());
+    ESP_LOGI(TAG, "[SEARCH] URL: %s (source=%s)", full_url.c_str(), MUSIC_SOURCE_TYPE);
     ESP_LOGI(TAG, "[SEARCH] Connecting to: %s", full_url.c_str());
 
     if (!http->Open("GET", full_url)) {
@@ -479,17 +476,34 @@ exit_task:
     Application::GetInstance().Schedule([self]() {
         self->playing_.store(false);
         self->CleanupMp3Decoder();
-        ESP_LOGI(TAG, "Music playback finished, triggering reconnect...");
 
-        // 通知显示
-        auto display = Board::GetInstance().GetDisplay();
-        if (display) {
-            display->ShowNotification("播放完毕");
-        }
-
-        // 重建协议连接（Reconnect 内部会触发 wake word 进入对话）
+        // 根据结束原因选择行为
         auto& app = Application::GetInstance();
-        app.Reconnect();
+        if (self->end_reason_ == EndReason::Stopped) {
+            // 被用户主动停止（按键/唤醒词），不需要触发 AI 对话，
+            // 唤醒词处理函数已经接管了音频通道
+            ESP_LOGI(TAG, "Music stopped by user, skip resume");
+        } else {
+            const char* wake_word = nullptr;
+            const char* notification = nullptr;
+            switch (self->end_reason_) {
+                case EndReason::Normal:
+                    wake_word = "音乐播放完毕";
+                    notification = "播放完毕";
+                    break;
+                case EndReason::Error:
+                    wake_word = "音乐播放中断，网络不太好";
+                    notification = "播放中断";
+                    break;
+                default:
+                    break;
+            }
+            auto display = Board::GetInstance().GetDisplay();
+            if (display) {
+                display->ShowNotification(notification);
+            }
+            app.ResumeAudioChannel(wake_word);
+        }
     });
 
     self->music_task_handle_ = nullptr;
@@ -525,7 +539,7 @@ void Esp32Music::MusicTaskLoop() {
                 break;
             }
 
-            http->SetTimeout(15000);
+            http->SetTimeout(8000);  // 8s 超时（原 15s），更快检测 TCP 断流
             http->SetKeepAlive(true);
             http->SetHeader("User-Agent", "ESP32-Music-Player/1.0");
             http->SetHeader("Accept", "*/*");
@@ -591,12 +605,30 @@ void Esp32Music::MusicTaskLoop() {
             ESP_LOGI(TAG, "[STREAM] connected HTTP %d, body_len=%u",
                      status, (unsigned)http->GetBodyLength());
 
-            // 流式读取 + 解码 + 播放
-            // 策略：先尽量填满缓冲区，然后批量解码多帧写入I2S，
-            // 只在缓冲区不足时再读HTTP，避免串行读-解码-写造成的音频间隙
+#ifdef MUSIC_STREAM_DEBUG
+            // ---- 网络调试: WiFi 信号 + 省电模式 ----
+            {
+                wifi_ap_record_t ap_info;
+                if (esp_wifi_sta_get_ap_info(&ap_info) == ESP_OK) {
+                    wifi_ps_type_t ps_type;
+                    esp_wifi_get_ps(&ps_type);
+                    ESP_LOGI(TAG, "[NET] WiFi RSSI=%d dBm ch=%d ps_type=%d (0=NONE 2=MAX_MODEM)",
+                             ap_info.rssi, ap_info.primary, (int)ps_type);
+                }
+            }
+#endif
+
+            // ---- 流式读取 + 解码 + 播放 ----
             size_t buf_pos = 0;
             bool first_frame = true;
             int total_body_bytes = 0;
+
+#ifdef MUSIC_STREAM_DEBUG
+            int64_t stream_start_us = esp_timer_get_time();
+            int64_t last_speed_log_us = stream_start_us;
+            int bytes_since_last_log = 0;
+            static constexpr int kSpeedLogIntervalS = 5;
+#endif
 
             while (!stop_requested_.load()) {
                 // 先尽量从HTTP读取数据填满缓冲区
@@ -606,20 +638,48 @@ void Esp32Music::MusicTaskLoop() {
                         kMp3ReadBufSize - buf_pos);
 
                     if (bytes_read < 0) {
+#ifdef MUSIC_STREAM_DEBUG
+                        int elapsed_s = (int)((esp_timer_get_time() - stream_start_us) / 1000000);
+                        int avg_kbps = (elapsed_s > 0) ? (int)((total_body_bytes * 8LL) / (elapsed_s * 1000)) : 0;
+                        ESP_LOGW(TAG, "[STREAM] Read ERR after %d s, decoded=%d total=%d buf=%d, avg=%d Kbps",
+                                 elapsed_s, (int)!first_frame, total_body_bytes, (int)buf_pos, avg_kbps);
+#else
                         ESP_LOGW(TAG, "[STREAM] Read ERR, decoded=%d total=%d buf=%d",
                                  (int)!first_frame, total_body_bytes, (int)buf_pos);
+#endif
                         break;
                     }
 
                     if (bytes_read == 0) {
+#ifdef MUSIC_STREAM_DEBUG
+                        int elapsed_s = (int)((esp_timer_get_time() - stream_start_us) / 1000000);
+                        int avg_kbps = (elapsed_s > 0) ? (int)((total_body_bytes * 8LL) / (elapsed_s * 1000)) : 0;
+                        ESP_LOGI(TAG, "[STREAM] EOF after %d s, decoded=%d total=%d avg=%d Kbps",
+                                 elapsed_s, (int)!first_frame, total_body_bytes, avg_kbps);
+#else
                         ESP_LOGI(TAG, "[STREAM] EOF, decoded=%d total=%d buf=%d",
                                  (int)!first_frame, total_body_bytes, (int)buf_pos);
+#endif
                         if (!first_frame) stream_success = true;
                         break;
                     }
 
                     total_body_bytes += bytes_read;
                     buf_pos += bytes_read;
+
+#ifdef MUSIC_STREAM_DEBUG
+                    bytes_since_last_log += bytes_read;
+                    int64_t now_us = esp_timer_get_time();
+                    int elapsed_s = (int)((now_us - last_speed_log_us) / 1000000);
+                    if (elapsed_s >= kSpeedLogIntervalS && bytes_since_last_log > 0) {
+                        int kbps = (int)((bytes_since_last_log * 8LL) / (elapsed_s * 1000));
+                        ESP_LOGI(TAG, "[NET] Speed: %d Kbps (%d bytes in %d s), total=%d buf=%d%%",
+                                 kbps, bytes_since_last_log, elapsed_s,
+                                 total_body_bytes, (int)(buf_pos * 100 / kMp3ReadBufSize));
+                        last_speed_log_us = now_us;
+                        bytes_since_last_log = 0;
+                    }
+#endif
                 }
 
                 // 跳过 ID3v2 标签
@@ -719,6 +779,12 @@ void Esp32Music::MusicTaskLoop() {
         ESP_LOGI(TAG, "Retry loop: stream_success=%d stop=%d, will retry",
                  (int)stream_success, (int)stop_requested_.load());
     }  // for retry
+
+    // 标记结束原因：重试耗尽且非用户停止 = 网络错误
+    if (!stream_success && !stop_requested_.load()) {
+        end_reason_ = EndReason::Error;
+        ESP_LOGW(TAG, "All retries exhausted, mark as Error");
+    }
 
     // 禁用音频输出
     auto codec = Board::GetInstance().GetAudioCodec();

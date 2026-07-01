@@ -1,7 +1,7 @@
 # AetherToys WiFi-CN 板开发文档
 
 > **适用板型**: `Aethertoys-wifi-CN`（艾泽盒子 WiFi 中国版）  
-> **更新日期**: 2026-06-04  
+> **更新日期**: 2026-07-01  
 > **主控芯片**: ESP32-S3 (QFN56), 8MB PSRAM  
 > **核心功能**: 闹钟管理 / 本地音乐播放 / 语音交互 / 双屏表情显示
 
@@ -12,6 +12,7 @@
 1. [硬件概述](#1-硬件概述)
 2. [引脚配置一览](#2-引脚配置一览)
 3. [闹钟系统](#3-闹钟系统)
+   - [3.0 实现状态](#30-实现状态)
    - [3.1 架构设计](#31-架构设计)
    - [3.2 数据结构](#32-数据结构)
    - [3.3 核心流程](#33-核心流程)
@@ -24,6 +25,7 @@
    - [4.2 播放流程](#42-播放流程)
    - [4.3 MCP 工具接口](#43-mcp-工具接口)
    - [4.4 默认播放列表](#44-默认播放列表)
+   - [4.5 音乐源配置](#45-音乐源配置)
 5. [设置存储系统 (NVS)](#5-设置存储系统-nvs)
 6. [构建与烧录](#6-构建与烧录)
 7. [调试与常见问题](#7-调试与常见问题)
@@ -136,6 +138,71 @@ DISPLAY_RIGHT_MIRROR_Y = true
 ---
 
 ## 3. 闹钟系统
+
+### 3.0 实现状态
+
+> ✅ **已实现 (2026-07-01)** — 从参考项目移植并优化，源代码位于:
+> - `main/alarm_manager.h` — 闹钟管理器头文件
+> - `main/alarm_manager.cc` — 闹钟管理器实现 (~500 行)
+> - 资源文件: `main/assets/common/alarm.ogg`
+>
+> **优化点**（相比参考项目）:
+> | 优化 | 说明 |
+> |------|------|
+> | FreeRTOS 音乐下载 | 替代 `std::thread`，符合 MCP 线程模型约定（参考 AGENTS.md） |
+> | 纯 UTC 时间计算 | 替代 `localtime_r/mktime`，避免 DST 时区切换问题 |
+> | `UpdateAlarmTime()` | 新增修改闹钟时间的方法（参考项目遗漏但文档定义） |
+> | `mcp_server.cc` 注册 | 6 个 `self.alarm.*` MCP 工具在 `AddCommonTools()` 中注册，全板型通用 |
+> | `application.cc` 启动 | `Initialize()` 中自动调用 `Start()`，无需板型单独接线 |
+> | BOOT 按钮停止 | 单击按钮优先停止正在响铃的闹钟（最高优先级） |
+> | **唤醒词打断** | 唤醒词检测时自动停止闹钟并清理音频管线再开始对话 |
+>
+> **注册位置**:
+> | 文件 | 修改内容 |
+> |------|---------|
+> | `main/CMakeLists.txt` | 在 `"mcp_server.cc"` 后添加 `"alarm_manager.cc"` |
+> | `main/mcp_server.cc` | `#include "alarm_manager.h"` + 在 `AddCommonTools()` 注册 6 个 `self.alarm.*` 工具 |
+> | `main/application.cc` | `#include "alarm_manager.h"` + `Initialize()` 中 `Start()` + `Run()` 中唤醒词打断逻辑 |
+> | `main/assets/lang_config.h` | 添加 `OGG_ALARM` 资源引用（`_binary_alarm_ogg_start`） |
+> | `main/boards/aethertoys-wifi-cn/dual-screen.cc` | `#include "alarm_manager.h"` + `OnClick()` 中 `IsRinging()` 检查 |
+>
+> **全部 6 个 MCP 工具**:
+> | 工具名 | 参数 | 功能 |
+> |--------|------|------|
+> | `self.alarm.set` | `time` (HH:MM), `repeat_daily`, `label` | 创建闹钟 |
+> | `self.alarm.cancel` | `id` | 删除闹钟 |
+> | `self.alarm.list` | 无 | 列出所有闹钟 |
+> | `self.alarm.enable` | `id`, `enabled` | 启用/禁用 |
+> | `self.alarm.update_time` | `id`, `time` | 修改时间 |
+> | `self.alarm.set_music` | `song_name`, `artist_name` | 设置闹铃音乐 |
+>
+> **调试中发现的 Bug 与修复**:
+>
+> | # | 问题 | 根因 | 修复 |
+> |---|------|------|------|
+> | 1 | 日志输出"Alarm ringing for ld seconds" | ESP-IDF 的 `printf` 不完全支持 `%lld` 格式符 | 改用 `%d` + `(int)` 强转 |
+> | 2 | 唤醒词"你好小安"无法打断闹钟 | 闹钟中断 AI 说话后，MQTT 音频通道残留"已打开"状态 → `HandleWakeWordDetectedEvent` 走错代码路径 → `ContinueWakeWordInvoke` 因 state!=Connecting 直接 return | 唤醒词打断闹钟时额外调用 `protocol_->CloseAudioChannel()` 清除残留状态，确保走正确的 `SetState(Connecting)→Schedule` 路径 |
+> | 3 | 主循环 `vTaskDelay(500)` 阻塞导致 SCHEDULE 任务无法执行 | `vTaskDelay` 在事件循环内执行会阻止所有排队任务（含 `DismissAlert`）被处理 | 改为同步冲刷 `main_tasks_` 队列（`std::move` + 直接执行）替代延迟等待 |
+>
+> **Bug #2 详细分析**（最重要）:
+> ```
+> 闹钟中断 AI 说话 → SetDeviceState(Idle)
+>   └─ 状态机切到 idle，但 MQTT 连接还活着，音频通道未正确关闭
+>         │
+> 用户说唤醒词 → HandleWakeWordDetectedEvent(state=idle)
+>   └─ protocol_->IsAudioChannelOpened() → TRUE（脏状态！）
+>         ├─ 走 ContinueWakeWordInvoke 直通路径（跳过 SetState(Connecting)）
+>         └─ ContinueWakeWordInvoke: GetState() == Idle != Connecting → return
+>               └─ 闹钟停了但设备永久卡在 idle，58s 后 MQTT 超时
+>
+> 修复（application.cc Run() 的 MAIN_EVENT_WAKE_WORD_DETECTED 分支）:
+>   1. StopRinging()                     // 停止闹钟
+>   2. flush main_tasks_                 // 同步执行 DismissAlert + music->Stop
+>   3. protocol_->CloseAudioChannel()    // ← 关闭残留的半开通道
+>   4. HandleWakeWordDetectedEvent()     // 现在 IsAudioChannelOpened()=false ✅
+>      → SetState(Connecting) → Schedule(ContinueWakeWordInvoke)
+>      → 下一次循环: OpenAudioChannel → 发唤醒词 → 服务器响应 ✅
+> ```
 
 ### 3.1 架构设计
 
@@ -434,6 +501,63 @@ AlarmManager::GetInstance().StopRinging();
 - "关闭所有闹钟" → `self.alarm.list` → 逐一 `self.alarm.cancel`
 - "还有哪些闹钟" → `self.alarm.list`
 
+#### 停止闹钟的四种方式
+
+| 方式 | 触发者 | 实现位置 |
+|------|--------|---------|
+| ⏱ **60s 超时自动停** | `ring_timer_` 到期 | `alarm_manager.cc:HandleRingTimer()` → `DismissAlert()` + `Stop()` |
+| 🔘 **BOOT 按钮单击** | 用户物理按键 | `dual-screen.cc:OnClick()` 中 `IsRinging()` 检查优先级最高 |
+| 🗣 **唤醒词打断** | 语音唤醒词 | `application.cc:Run()` 中 `MAIN_EVENT_WAKE_WORD_DETECTED` 分支，停止闹钟 + 关闭残留音频通道 + 刷新 SCHEDULE 队列 |
+| 💬 **语音指令** | AI 调用 MCP | 云端理解"关闭闹钟"→ 调用 `self.alarm.cancel` 删除闹钟 |
+
+**BOOT 按钮优先级**（`dual-screen.cc` `InitializeButtons()`）:
+```cpp
+boot_button_.OnClick([this]() {
+    // 1. 闹钟响铃中 → 停止闹钟（最高优先级）
+    if (AlarmManager::GetInstance().IsRinging()) {
+        AlarmManager::GetInstance().StopRinging();
+        return;
+    }
+    // 2. 音乐播放中 → 停止音乐
+    if (music_ && music_->IsPlaying()) { music_->Stop(); return; }
+    // 3. 启动中 → 进入配网模式
+    if (app.GetDeviceState() == kDeviceStateStarting) { ... }
+    // 4. 正常 → 唤醒对话
+    app.WakeWordInvoke(...);
+});
+```
+
+**唤醒词打断闹钟流程**（`application.cc` `Run()` 中 `MAIN_EVENT_WAKE_WORD_DETECTED` 分支）:
+```cpp
+if (AlarmManager::GetInstance().IsRinging()) {
+    // 1. 停止闹钟（设置 ringing_=false, 停 ring_timer_, Schedule DismissAlert+Stop）
+    AlarmManager::GetInstance().StopRinging();
+    // 2. 同步执行已排队的清理任务（DismissAlert + music->Stop）
+    //    注意：不能用 vTaskDelay 阻塞主循环，否则 SCHEDULE 任务永远不会执行
+    {
+        std::unique_lock<std::mutex> lock(mutex_);
+        auto pending = std::move(main_tasks_);
+        lock.unlock();
+        for (auto& task : pending) { task(); }
+    }
+    // 3. 关闭闹钟中断 AI 说话后残留的半开音频通道
+    //    如果不做这一步，protocol_->IsAudioChannelOpened() 返回 true
+    //    → HandleWakeWordDetectedEvent 走错分支 → 设备永久卡在 idle
+    if (protocol_ && protocol_->IsAudioChannelOpened()) {
+        protocol_->CloseAudioChannel();
+    }
+}
+HandleWakeWordDetectedEvent();  // 正常唤醒词流程
+```
+
+#### 闹钟触发时的音频抢占流程
+
+当闹钟触发时，无论设备当前处于什么状态（Speaking/Listening/Idle），`AlarmManager` 会：
+1. `SetDeviceState(kDeviceStateIdle)` — 强制切回空闲态，断开 WebSocket 语音通道
+2. `music->Stop()` — 清空 I2S 输出缓冲区的残留 TTS/音乐数据
+3. `Alert("Alarm", msg, "neutral", OGG_ALARM)` — 独占播放闹钟铃音
+4. `ring_timer_` 启动 — 每 2s 重复 Alert（刷新屏幕显示 + 重复铃音）
+
 ---
 
 ## 4. 音乐播放系统
@@ -581,6 +705,30 @@ static const PlaylistEntry kDefaultPlaylist[] = {
 
 > 修改默认播放列表: 编辑 `main/mcp_server.cc` 中的 `kDefaultPlaylist` 数组。
 
+### 4.5 音乐源配置
+
+> **默认**: `kw`（酷我音乐）— 经实测 CDN 对 ESP32 最友好，稳定 1Mbps+
+> **配置位置**: `main/boards/common/esp32_music.cc` 第 32 行 `MUSIC_SOURCE_TYPE`
+
+音乐搜索通过 `shybot.top` 聚合 API，支持切换不同音乐平台：
+
+| 值 | 平台 | ESP32 CDN 实测速度 | 流畅度 |
+|----|------|-------------------|:---:|
+| `kw` | 酷我音乐 | **~1 Mbps（129 KB/s）** | ✅ 流畅 |
+| `qq` | QQ音乐 | ~68 Kbps（8.5 KB/s） | ❌ 卡顿 |
+| `wy` | 网易云音乐 | 未测试 | — |
+| `kg` | 酷狗音乐 | 未测试 | — |
+
+**切换方法**：修改 `main/boards/common/esp32_music.cc` 顶部：
+
+```cpp
+#define MUSIC_SOURCE_TYPE "kw"   // 默认酷我，可选: qq | wy | kg | kw
+```
+
+**为什么 QQ 音乐慢**：QQ 音乐 CDN（`sjy6.stream.qqmusic.qq.com`）对 ESP32 客户端有明显限速，实测仅 8 KB/s，远低于 128kbps MP3 所需的 16 KB/s。酷我 CDN（`kw-er.kuwo.cn`）无此限制，稳定供速。
+
+**音乐播放结束后的网络清理**：HTTP 流式播放经过多次超时/重试后，lwIP 协议栈可能残留 TCP 半开连接，导致后续 MQTT 重连 DNS 解析失败。`MusicTaskFunc` 出口已加入 2 秒延迟等待 TCP 释放后重连。
+
 ---
 
 ## 5. 设置存储系统 (NVS)
@@ -710,9 +858,7 @@ AlarmManager: Failed to start alarm music, fallback to alarm.ogg
 
 #### Q3: 闹钟在对话中不打断
 
-**预期行为**: `StartRinging` 会强制调用 `SwitchToIdle()` 打断当前对话。如果未生效，检查:
-- `Application::GetDeviceState()` 返回值
-- `SwitchToIdle()` 是否正确实现
+**预期行为**: `StartRinging` 会强制调用 `SetDeviceState(kDeviceStateIdle)` 打断当前对话，抢占 I2S 音频资源。
 
 #### Q4: 单次闹钟重启后消失
 
@@ -722,9 +868,9 @@ AlarmManager: Failed to start alarm music, fallback to alarm.ogg
 
 **现象**: 音乐播放时 TTS 声音被覆盖或混叠
 
-**原因**: 音乐 PCM 和 TTS PCM 共享同一 `AudioOutputTask` 输出通路
+**原因**: 音乐 PCM 和 TTS PCM 共享同一输出通路（I2S → ES8311）
 
-**解决**: 播放音乐前确保 `SwitchToIdle()` 完成，`StopStreaming()` 清理缓冲区。
+**解决**: 播放音乐前确保 `SetDeviceState(kDeviceStateIdle)` 完成，`music->Stop()` 清理缓冲区。
 
 #### Q6: 搜索音乐时唤醒词无响应（卡在 self.music.search）
 
@@ -738,6 +884,30 @@ AlarmManager: Failed to start alarm music, fallback to alarm.ogg
 ```
 [SEARCH] Timed out after 10000ms, aborting HTTP
 ```
+
+#### Q7: 唤醒词"你好小安"无法打断闹钟（已修复）
+
+**现象**: 闹钟响铃时说唤醒词，闹钟停止但设备无响应，~58秒后自动断开会话。
+
+**日志特征**:
+```
+AlarmManager: Alarm ringing stopped
+Application: Wake word detected: nihaoxiaoan (state: 3)
+AfeWakeWord: Encode wake word opus 35 packets in 251 ms
+[此后无任何状态转换，~58秒后 MQTT goodbye]
+```
+
+**根因**: 闹钟中断 AI 说话后 `SetDeviceState(Idle)` 只改了状态机状态，MQTT 音频通道仍处于"已打开"的脏状态。后续唤醒词触发 `HandleWakeWordDetectedEvent` 时，`protocol_->IsAudioChannelOpened()` 返回 true → 走了 `ContinueWakeWordInvoke` 直通路径（跳过 `SetState(Connecting)`）→ `ContinueWakeWordInvoke` 检查 state != Connecting → return，设备永久卡在 idle。
+
+**修复**: 在 `application.cc` 的 `MAIN_EVENT_WAKE_WORD_DETECTED` 分支中，停止闹钟后额外调用 `protocol_->CloseAudioChannel()` 清除残留状态。详见 §3.0 的 Bug #2 分析。
+
+#### Q8: 闹钟日志显示 "ringing for ld seconds"
+
+**现象**: 串口日志输出 `Alarm ringing for ld seconds` 而非 `Alarm ringing for 60 seconds`
+
+**根因**: ESP-IDF 的 `newlib` printf 不完全支持 `%lld` 格式符，`%ll` 被解析为 `%l`（无效）后原样输出 `l` + 字面量 `d`。
+
+**修复**: 改用 `%d` + `(int)` 强转（`alarm_manager.cc`）。
 
 ### 调试技巧
 
