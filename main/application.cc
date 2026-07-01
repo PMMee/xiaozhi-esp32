@@ -8,6 +8,7 @@
 #include "websocket_protocol.h"
 #include "assets/lang_config.h"
 #include "mcp_server.h"
+#include "alarm_manager.h"
 #include "assets.h"
 #include "settings.h"
 
@@ -99,6 +100,9 @@ void Application::Initialize() {
     auto& mcp_server = McpServer::GetInstance();
     mcp_server.AddCommonTools();
     mcp_server.AddUserOnlyTools();
+
+    // Start the alarm manager (闹钟管理器)
+    AlarmManager::GetInstance().Start();
 
     // Set network event callback for UI updates and network state handling
     board.SetNetworkEventCallback([this](NetworkEvent event, const std::string& data) {
@@ -228,6 +232,24 @@ void Application::Run() {
         }
 
         if (bits & MAIN_EVENT_WAKE_WORD_DETECTED) {
+            // 如果闹钟正在响铃，先停止闹钟并确保协议处于干净状态
+            if (AlarmManager::GetInstance().IsRinging()) {
+                AlarmManager::GetInstance().StopRinging();
+                // 立即执行已排队的清理任务（DismissAlert + Stop）
+                {
+                    std::unique_lock<std::mutex> lock(mutex_);
+                    auto pending = std::move(main_tasks_);
+                    lock.unlock();
+                    for (auto& task : pending) {
+                        task();
+                    }
+                }
+                // 关闭闹钟中断 AI 说话后残留的半开音频通道，
+                // 确保 HandleWakeWordDetectedEvent 走 Connecting → Schedule 路径
+                if (protocol_ && protocol_->IsAudioChannelOpened()) {
+                    protocol_->CloseAudioChannel();
+                }
+            }
             HandleWakeWordDetectedEvent();
         }
 
@@ -788,13 +810,16 @@ void Application::HandleStopListeningEvent() {
 }
 
 void Application::HandleWakeWordDetectedEvent() {
+    // 如果正在播放音乐，先停止音乐再处理唤醒词
+    //（SuspendAudioChannel 模式下 MQTT 连接保活，protocol_ 不为空，
+    //  必须在此显式检查，不能仅依赖 !protocol_ 分支）
+    auto music = Board::GetInstance().GetMusic();
+    if (music && music->IsPlaying()) {
+        ESP_LOGI(TAG, "Wake word detected during music playback, stopping music");
+        music->Stop();
+    }
+
     if (!protocol_) {
-        // 检查是否正在播放音乐，如果是则停止音乐（音乐退出后会重连并触发对话）
-        auto music = Board::GetInstance().GetMusic();
-        if (music && music->IsPlaying()) {
-            ESP_LOGI(TAG, "Wake word detected during music playback, stopping music");
-            music->Stop();
-        }
         return;
     }
 
@@ -1148,15 +1173,45 @@ void Application::ResetProtocol() {
     });
 }
 
-void Application::Reconnect() {
-    Schedule([this]() {
+void Application::Reconnect(const std::string& wake_word_message) {
+    Schedule([this, wake_word_message]() {
         // 重建 OTA 读取配置，走正常 InitializeProtocol 流程（和启动时一致）
         ota_ = std::make_unique<Ota>();
         InitializeProtocol();
         ota_.reset();
         SetDeviceState(kDeviceStateIdle);
-        // 协议就绪后触发唤醒进入对话
-        WakeWordInvoke("音乐播放完毕");
+        // 协议就绪后触发唤醒进入对话（消息内容由调用方决定：正常结束/用户停止/网络中断）
+        WakeWordInvoke(wake_word_message);
+    });
+}
+
+void Application::SuspendAudioChannel() {
+    Schedule([this]() {
+        if (protocol_ && protocol_->IsAudioChannelOpened()) {
+            protocol_->CloseAudioChannel(true);  // 发送 goodbye，告诉服务端会话结束
+        }
+        SetDeviceState(kDeviceStateIdle);
+        ESP_LOGI(TAG, "Audio channel suspended (goodbye sent)");
+    });
+}
+
+void Application::ResumeAudioChannel(const std::string& wake_word_message) {
+    Schedule([this, wake_word_message]() {
+        if (!protocol_) {
+            ESP_LOGW(TAG, "No protocol to resume, falling back to full reconnect");
+            Reconnect(wake_word_message);
+            return;
+        }
+
+        // 确保处于 idle 状态，然后让 WakeWordInvoke 自己处理 OpenAudioChannel
+        // 不要在这里提前 OpenAudioChannel，否则 WakeWordInvoke 会走 ContinueWakeWordInvoke
+        // 直通路径（跳过 SetState(Connecting)），导致 state!=Connecting 而直接 return
+        if (GetDeviceState() != kDeviceStateIdle) {
+            SetDeviceState(kDeviceStateIdle);
+        }
+
+        ESP_LOGI(TAG, "Resuming audio channel, triggering wake word: %s", wake_word_message.c_str());
+        WakeWordInvoke(wake_word_message);
     });
 }
 

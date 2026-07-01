@@ -5,6 +5,7 @@
 #include "application.h"
 #include "mcp_server.h"
 #include "button.h"
+#include "alarm_manager.h"
 #include "config.h"
 #include "esp_lcd_gc9d01.h"
 #include <esp_lvgl_port.h>
@@ -474,10 +475,11 @@ private:
 
                 Application::GetInstance().Schedule([this, song, artist]() {
                     auto& app = Application::GetInstance();
-                    app.ResetProtocol();
+                    app.SuspendAudioChannel();  // 只关音频通道，保留 MQTT 连接
                     vTaskDelay(pdMS_TO_TICKS(200));
                     if (!music_->Start(song, artist)) {
                         app.Alert("Error", "播放失败", "neutral", Lang::Sounds::OGG_EXCLAMATION);
+                        app.ResumeAudioChannel("音乐播放失败");
                     }
                 });
                 return std::string("{\"ok\":true,\"message\":\"正在播放 " + song + "\"}");
@@ -577,6 +579,12 @@ private:
 
     void InitializeButtons() {
         boot_button_.OnClick([this]() {
+            // 闹钟响铃中 — 单击停止（最高优先级）
+            if (AlarmManager::GetInstance().IsRinging()) {
+                AlarmManager::GetInstance().StopRinging();
+                return;
+            }
+
             auto& app = Application::GetInstance();
             ESP_LOGI(TAG, "Boot button single click, state=%d", app.GetDeviceState());
 

@@ -14,6 +14,7 @@
 #include "display.h"
 #include "oled_display.h"
 #include "board.h"
+#include "alarm_manager.h"
 #include "settings.h"
 #include "lvgl_theme.h"
 #include "lvgl_display.h"
@@ -120,6 +121,97 @@ void McpServer::AddCommonTools() {
             });
     }
 #endif
+
+    // ==================== 闹钟管理工具 ====================
+    auto& alarm_mgr = AlarmManager::GetInstance();
+
+    AddTool("self.alarm.set",
+        "创建新闹钟。参数 time 格式为 HH:MM (24小时制)，repeat_daily 为 true 表示每日重复，label 为可选的闹钟标签。",
+        PropertyList({
+            Property("time", kPropertyTypeString),
+            Property("repeat_daily", kPropertyTypeBoolean, false),
+            Property("label", kPropertyTypeString, std::string("")),
+        }),
+        [&alarm_mgr](const PropertyList& properties) -> ReturnValue {
+            std::string id, error;
+            bool ok = alarm_mgr.AddAlarm(
+                properties["time"].value<std::string>(),
+                properties["repeat_daily"].value<bool>(),
+                properties["label"].value<std::string>(),
+                id, error);
+            if (!ok) {
+                return std::string("{\"success\":false,\"error\":\"") + error + "\"}";
+            }
+            return std::string("{\"success\":true,\"id\":\"") + id + "\"}";
+        });
+
+    AddTool("self.alarm.cancel",
+        "删除指定闹钟。参数 id 为闹钟的唯一标识。",
+        PropertyList({
+            Property("id", kPropertyTypeString),
+        }),
+        [&alarm_mgr](const PropertyList& properties) -> ReturnValue {
+            bool ok = alarm_mgr.CancelAlarm(properties["id"].value<std::string>());
+            return std::string("{\"success\":") + (ok ? "true" : "false") + "}";
+        });
+
+    AddTool("self.alarm.list",
+        "列出所有闹钟（包括已启用和已禁用的）。返回闹钟的 id、时间、重复模式、标签和下次触发时间。",
+        PropertyList(),
+        [&alarm_mgr](const PropertyList& properties) -> ReturnValue {
+            return alarm_mgr.GetAlarmsJson();
+        });
+
+    AddTool("self.alarm.enable",
+        "启用或禁用指定闹钟。参数 id 为闹钟标识，enabled 为 true 启用、false 禁用。",
+        PropertyList({
+            Property("id", kPropertyTypeString),
+            Property("enabled", kPropertyTypeBoolean, true),
+        }),
+        [&alarm_mgr](const PropertyList& properties) -> ReturnValue {
+            std::string error;
+            bool ok = alarm_mgr.SetEnabled(
+                properties["id"].value<std::string>(),
+                properties["enabled"].value<bool>(),
+                &error);
+            if (!ok && !error.empty()) {
+                return std::string("{\"success\":false,\"error\":\"") + error + "\"}";
+            }
+            return std::string("{\"success\":") + (ok ? "true" : "false") + "}";
+        });
+
+    AddTool("self.alarm.update_time",
+        "修改指定闹钟的触发时间。参数 id 为闹钟标识，time 为新的时间 (HH:MM 格式)。",
+        PropertyList({
+            Property("id", kPropertyTypeString),
+            Property("time", kPropertyTypeString),
+        }),
+        [&alarm_mgr](const PropertyList& properties) -> ReturnValue {
+            std::string error;
+            bool ok = alarm_mgr.UpdateAlarmTime(
+                properties["id"].value<std::string>(),
+                properties["time"].value<std::string>(),
+                error);
+            if (!ok) {
+                return std::string("{\"success\":false,\"error\":\"") + error + "\"}";
+            }
+            return std::string("{\"success\":true}") ;
+        });
+
+    AddTool("self.alarm.set_music",
+        "设置闹铃音乐。设置后闹钟触发时将播放指定的在线音乐。留空 song_name 和 artist_name 可恢复默认铃音。",
+        PropertyList({
+            Property("song_name", kPropertyTypeString, std::string("")),
+            Property("artist_name", kPropertyTypeString, std::string("")),
+        }),
+        [&alarm_mgr](const PropertyList& properties) -> ReturnValue {
+            std::string error;
+            bool ok = alarm_mgr.SetAlarmMusic(
+                properties["song_name"].value<std::string>(),
+                properties["artist_name"].value<std::string>(),
+                error);
+            return std::string("{\"success\":") + (ok ? "true" : "false") + "}";
+        });
 
     // Restore the original tools list to the end of the tools list
     tools_.insert(tools_.end(), original_tools.begin(), original_tools.end());
