@@ -41,6 +41,12 @@ public:
     virtual std::string GetSongName() const override;
     virtual std::string GetArtistName() const override;
 
+    // 暂停/续播
+    void Pause();
+    void Resume();
+    bool IsPaused() const { return paused_.load(); }
+    bool CanResume() const { return paused_.load() && !resume_url_.empty(); }
+
 private:
     // ---- 搜索阶段 ----
     cJSON* SearchMusicInternal(const std::string& song_name, const std::string& artist_name);
@@ -81,6 +87,11 @@ private:
     std::atomic<bool> playing_{false};
     std::atomic<bool> stop_requested_{false};
     EndReason end_reason_{EndReason::Normal};  // 本次播放结束原因
+    std::atomic<bool> paused_{false};          // 暂停状态（可续播）
+    std::string resume_url_;                   // 续播 URL
+    size_t resume_offset_{0};                  // 续播 HTTP 字节偏移
+    std::string resume_song_name_;             // 续播歌曲名
+    std::string resume_artist_name_;           // 续播歌手名
 
     TaskHandle_t music_task_handle_{nullptr};
 
@@ -98,6 +109,9 @@ private:
     // 正在使用的 HTTP 连接（用于外部 abort）
     std::mutex http_mutex_;
     Http* active_http_{nullptr};
+
+    // 流式下载进度（供暂停续播使用）
+    std::atomic<size_t> streamed_bytes_{0};
 
     // 搜索任务并发保护
     std::atomic<bool> search_task_running_{false};

@@ -14,6 +14,15 @@ public:
     // 停止播放（线程安全，可从任何上下文调用）
     virtual void Stop() {}
 
+    // 暂停（保存进度，可通过 Resume 续播）
+    virtual void Pause() { Stop(); }
+
+    // 续播上次暂停的音乐（需先调用过 Pause）
+    virtual void Resume() {}
+
+    // 是否可续播
+    virtual bool CanResume() const { return false; }
+
     // 是否正在播放
     virtual bool IsPlaying() const { return false; }
 

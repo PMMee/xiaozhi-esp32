@@ -810,13 +810,15 @@ void Application::HandleStopListeningEvent() {
 }
 
 void Application::HandleWakeWordDetectedEvent() {
+    int64_t t_entry = esp_timer_get_time();
+
     // 如果正在播放音乐，先停止音乐再处理唤醒词
     //（SuspendAudioChannel 模式下 MQTT 连接保活，protocol_ 不为空，
     //  必须在此显式检查，不能仅依赖 !protocol_ 分支）
     auto music = Board::GetInstance().GetMusic();
     if (music && music->IsPlaying()) {
-        ESP_LOGI(TAG, "Wake word detected during music playback, stopping music");
-        music->Stop();
+        ESP_LOGI(TAG, "Wake word detected during music playback, pausing music");
+        music->Pause();  // 暂停（可续播），而非停止
     }
 
     if (!protocol_) {
@@ -829,6 +831,9 @@ void Application::HandleWakeWordDetectedEvent() {
 
     if (state == kDeviceStateIdle) {
         audio_service_.EncodeWakeWord();
+        int64_t t_encoded = esp_timer_get_time();
+        ESP_LOGI(TAG, "[TIME] Encode wake word: %d us", (int)(t_encoded - t_entry));
+
         auto wake_word = audio_service_.GetLastWakeWord();
 
         if (!protocol_->IsAudioChannelOpened()) {
@@ -865,6 +870,8 @@ void Application::HandleWakeWordDetectedEvent() {
 }
 
 void Application::ContinueWakeWordInvoke(const std::string& wake_word) {
+    int64_t t_enter = esp_timer_get_time();
+
     // Check state again in case it was changed during scheduling
     if (GetDeviceState() != kDeviceStateConnecting) {
         return;
@@ -875,18 +882,26 @@ void Application::ContinueWakeWordInvoke(const std::string& wake_word) {
     board.SetPowerSaveLevel(PowerSaveLevel::PERFORMANCE);
 
     if (!protocol_->IsAudioChannelOpened()) {
+        int64_t t_before_open = esp_timer_get_time();
         if (!protocol_->OpenAudioChannel()) {
             audio_service_.EnableWakeWordDetection(true);
             return;
         }
+        int64_t t_after_open = esp_timer_get_time();
+        ESP_LOGI(TAG, "[TIME] OpenAudioChannel: %d us", (int)(t_after_open - t_before_open));
     }
 
     ESP_LOGI(TAG, "Wake word detected: %s", wake_word.c_str());
 #if CONFIG_SEND_WAKE_WORD_DATA
+    int64_t t_before_send = esp_timer_get_time();
     // Encode and send the wake word data to the server
     while (auto packet = audio_service_.PopWakeWordPacket()) {
         protocol_->SendAudio(std::move(packet));
     }
+    int64_t t_after_send = esp_timer_get_time();
+    ESP_LOGI(TAG, "[TIME] Send wake word: %d us (total invoke: %d us)",
+             (int)(t_after_send - t_before_send), (int)(t_after_send - t_enter));
+
     // Set the chat state to wake word detected
     protocol_->SendWakeWordDetected(wake_word);
     SetListeningMode(GetDefaultListeningMode());
