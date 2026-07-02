@@ -496,6 +496,22 @@ private:
                 return std::string("{\"ok\":false,\"message\":\"当前未在播放\"}");
             });
 
+        mcp_server.AddTool("self.music.resume",
+            "恢复播放被暂停的音乐（唤醒词打断后说继续播放）",
+            PropertyList(),
+            [this](const PropertyList& properties) -> ReturnValue {
+                if (music_ && music_->CanResume()) {
+                    Application::GetInstance().Schedule([this]() {
+                        auto& app = Application::GetInstance();
+                        app.SuspendAudioChannel();  // 关音频通道，停止当前 TTS
+                        vTaskDelay(pdMS_TO_TICKS(200));
+                        music_->Resume();
+                    });
+                    return std::string("{\"ok\":true,\"message\":\"已恢复播放\"}");
+                }
+                return std::string("{\"ok\":false,\"message\":\"没有可恢复的播放\"}");
+            });
+
         mcp_server.AddTool("self.music.search",
             "搜索歌曲（不播放），返回搜索结果JSON",
             PropertyList({

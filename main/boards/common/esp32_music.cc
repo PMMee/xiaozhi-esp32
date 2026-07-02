@@ -140,6 +140,15 @@ bool Esp32Music::Start(const std::string& song_name, const std::string& artist_n
         Stop();
     }
 
+    // 清除暂停状态 — 新歌总是从头播放
+    paused_.store(false);
+    end_reason_ = EndReason::Normal;
+    resume_url_.clear();
+    resume_offset_ = 0;
+    resume_song_name_.clear();
+    resume_artist_name_.clear();
+    current_music_url_.clear();
+
     {
         std::lock_guard<std::mutex> lock(info_mutex_);
         current_song_name_ = trim_copy(song_name);
@@ -171,14 +180,24 @@ bool Esp32Music::Start(const std::string& song_name, const std::string& artist_n
     return true;
 }
 
-void Esp32Music::Stop() {
+void Esp32Music::Pause() {
     if (!playing_.load()) return;
 
-    ESP_LOGI(TAG, "Stopping music playback");
+    ESP_LOGI(TAG, "Pausing music (resume at offset %u)", (unsigned)streamed_bytes_.load());
     stop_requested_.store(true);
     end_reason_ = EndReason::Stopped;
 
-    // 中断 HTTP 连接（让流式读取立即返回，加速任务退出）
+    // 保存续播状态
+    resume_url_ = current_music_url_;
+    resume_offset_ = streamed_bytes_.load();
+    {
+        std::lock_guard<std::mutex> lock(info_mutex_);
+        resume_song_name_ = current_song_name_;
+        resume_artist_name_ = current_artist_name_;
+    }
+    paused_.store(true);
+
+    // 中断 HTTP 连接
     {
         std::lock_guard<std::mutex> lock(http_mutex_);
         if (active_http_) {
@@ -186,13 +205,61 @@ void Esp32Music::Stop() {
             active_http_ = nullptr;
         }
     }
+}
 
-    // 不在这里等待任务退出 — Stop() 可能被主事件循环同步调用，
-    // 阻塞主循环会导致其他事件无法处理。cleanup 由任务的 exit_task 回调负责。
+void Esp32Music::Resume() {
+    if (!paused_.load()) {
+        ESP_LOGW(TAG, "Cannot resume: not paused");
+        return;
+    }
+    if (resume_url_.empty()) {
+        ESP_LOGW(TAG, "Cannot resume: no saved URL");
+        paused_.store(false);
+        return;
+    }
+
+    ESP_LOGI(TAG, "Resuming from offset %u: %s - %s",
+             (unsigned)resume_offset_, resume_song_name_.c_str(), resume_artist_name_.c_str());
+
+    stop_requested_.store(false);
+    end_reason_ = EndReason::Normal;
+    paused_.store(false);
+
+    // 恢复上次的状态
+    {
+        std::lock_guard<std::mutex> lock(info_mutex_);
+        current_song_name_ = resume_song_name_;
+        current_artist_name_ = resume_artist_name_;
+        current_music_url_ = resume_url_;
+    }
+    playing_.store(true);
+    streamed_bytes_.store(0);
+
+    // 重新创建播放任务
+    auto* arg = new MusicTaskArg{this, resume_song_name_, resume_artist_name_};
+    xTaskCreate(MusicTaskFunc, "music_play", 8192, arg, 5, &music_task_handle_);
+}
+
+void Esp32Music::Stop() {
+    if (!playing_.load() && !paused_.load()) return;
+
+    ESP_LOGI(TAG, "Stopping music playback");
+    stop_requested_.store(true);
+    end_reason_ = EndReason::Stopped;
+    paused_.store(false);  // 清除暂停状态
+
+    // 中断 HTTP 连接
+    {
+        std::lock_guard<std::mutex> lock(http_mutex_);
+        if (active_http_) {
+            active_http_->Close();
+            active_http_ = nullptr;
+        }
+    }
 }
 
 bool Esp32Music::IsPlaying() const {
-    return playing_.load();
+    return playing_.load() || paused_.load();
 }
 
 std::string Esp32Music::Search(const std::string& song_name, const std::string& artist_name) {
@@ -316,8 +383,13 @@ cJSON* Esp32Music::SearchMusicInternal(const std::string& song_name, const std::
 
     if (!song_name.empty()) {
         full_url = base_url + "&name=" + url_encode(song_name);
-    } else {
-        full_url = base_url + "&singer=" + url_encode(artist_name);
+        if (!artist_name.empty()) {
+            full_url += "&singer=" + url_encode(artist_name);
+        }
+    } else if (!artist_name.empty()) {
+        // API 强制要求 &name 参数，只传 &singer 会返回 "歌名不见了？qwq"
+        // 没有歌名时直接用歌手名作为搜索关键词
+        full_url = base_url + "&name=" + url_encode(artist_name);
     }
 
     auto network = Board::GetInstance().GetNetwork();
@@ -366,6 +438,8 @@ cJSON* Esp32Music::SearchMusicInternal(const std::string& song_name, const std::
     }
 
     ESP_LOGI(TAG, "[SEARCH] Response size: %d bytes", (int)response_data.size());
+    // 诊断日志：打印原始响应（方便排查歌手搜索返回空JSON等问题）
+    ESP_LOGI(TAG, "[SEARCH] Raw body: [%s]", response_data.c_str());
     if (response_data.empty()) {
         ESP_LOGE(TAG, "[SEARCH] Empty response from music API");
         return nullptr;
@@ -401,76 +475,62 @@ void Esp32Music::MusicTaskFunc(void* arg) {
 
     ESP_LOGI(TAG, "[TASK] Starting music task: song='%s' artist='%s'", song.c_str(), artist.c_str());
 
-    // 搜索歌曲（在 Task 中异步执行，不阻塞主循环）
-    cJSON* response_json = self->SearchMusicInternal(song, artist);
-    if (!response_json) {
-        ESP_LOGE(TAG, "[TASK] Search failed for: %s", song.c_str());
-        goto exit_task;
-    }
-
-    {
-        cJSON* selected = select_song_by_artist(response_json, artist);
-        if (!selected) {
-            ESP_LOGE(TAG, "[TASK] No song found in results");
-            cJSON_Delete(response_json);
-            goto exit_task;
-        }
-
-        cJSON* title_json = cJSON_GetObjectItem(selected, "name");
-        cJSON* artist_json = cJSON_GetObjectItem(selected, "singer");
-        cJSON* url_json = cJSON_GetObjectItem(selected, "url");
-
-        const char* title_str = cJSON_IsString(title_json) ? title_json->valuestring : "?";
-        const char* artist_str = cJSON_IsString(artist_json) ? artist_json->valuestring : "?";
-        const char* url_str = (cJSON_IsString(url_json) && url_json->valuestring) ? url_json->valuestring : "";
-
-        ESP_LOGI(TAG, "[TASK] Selected: '%s' - '%s', url=%s", title_str, artist_str, url_str);
-
-        // 打印选中歌曲的完整 JSON
-        char* item_json = cJSON_PrintUnformatted(selected);
-        ESP_LOGI(TAG, "[TASK] Item JSON: %s", item_json ? item_json : "null");
-        cJSON_free(item_json);
-
-        if (cJSON_IsString(title_json)) {
-            std::lock_guard<std::mutex> lock(self->info_mutex_);
-            self->current_song_name_ = title_json->valuestring;
-        }
-        if (cJSON_IsString(artist_json)) {
-            std::lock_guard<std::mutex> lock(self->info_mutex_);
-            self->current_artist_name_ = artist_json->valuestring;
-        }
-
-        if (url_str[0] == '\0') {
-            ESP_LOGE(TAG, "[TASK] No audio URL in search result");
-            cJSON_Delete(response_json);
-            goto exit_task;
-        }
-
-        std::string music_url = url_str;
-        if (music_url.find('?') == std::string::npos) {
-            music_url += "?";
+    // 如果是续播（URL 已在 Resume() 中设置好），跳过搜索直接播放
+    if (!self->current_music_url_.empty()) {
+        ESP_LOGI(TAG, "[TASK] Resume mode, skipping search");
+        self->MusicTaskLoop();
+    } else {
+        // 搜索歌曲（在 Task 中异步执行，不阻塞主循环）
+        cJSON* response_json = self->SearchMusicInternal(song, artist);
+        if (!response_json) {
+            ESP_LOGE(TAG, "[TASK] Search failed for: %s", song.c_str());
         } else {
-            music_url += "&";
+            cJSON* selected = select_song_by_artist(response_json, artist);
+            if (!selected) {
+                ESP_LOGE(TAG, "[TASK] No song found in results");
+                cJSON_Delete(response_json);
+            } else {
+                cJSON* url_json = cJSON_GetObjectItem(selected, "url");
+                const char* url_str = (cJSON_IsString(url_json) && url_json->valuestring) ? url_json->valuestring : "";
+
+                ESP_LOGI(TAG, "[TASK] Selected: '%s' - '%s', url=%s",
+                    cJSON_IsString(cJSON_GetObjectItem(selected, "name")) ? cJSON_GetObjectItem(selected, "name")->valuestring : "?",
+                    cJSON_IsString(cJSON_GetObjectItem(selected, "singer")) ? cJSON_GetObjectItem(selected, "singer")->valuestring : "?",
+                    url_str);
+
+                if (url_str[0] != '\0') {
+                    if (cJSON_IsString(cJSON_GetObjectItem(selected, "name"))) {
+                        std::lock_guard<std::mutex> lock(self->info_mutex_);
+                        self->current_song_name_ = cJSON_GetObjectItem(selected, "name")->valuestring;
+                    }
+                    if (cJSON_IsString(cJSON_GetObjectItem(selected, "singer"))) {
+                        std::lock_guard<std::mutex> lock(self->info_mutex_);
+                        self->current_artist_name_ = cJSON_GetObjectItem(selected, "singer")->valuestring;
+                    }
+
+                    std::string music_url = url_str;
+                    if (music_url.find('?') == std::string::npos) {
+                        music_url += "?";
+                    } else {
+                        music_url += "&";
+                    }
+                    music_url += "shykey=6df7c755ae9f9fb598572b34194a8b060fb5fb611dcb20f783f1a7a9ea6937aa";
+
+                    ESP_LOGI(TAG, "[TASK] Final stream URL: %s", music_url.c_str());
+                    {
+                        std::lock_guard<std::mutex> lock(self->info_mutex_);
+                        self->current_music_url_ = std::move(music_url);
+                    }
+                    ESP_LOGI(TAG, "[TASK] Starting stream: %s - %s",
+                        self->current_song_name_.c_str(), self->current_artist_name_.c_str());
+                    self->MusicTaskLoop();
+                } else {
+                    ESP_LOGE(TAG, "[TASK] No audio URL in search result");
+                }
+                cJSON_Delete(response_json);
+            }
         }
-        music_url += "shykey=6df7c755ae9f9fb598572b34194a8b060fb5fb611dcb20f783f1a7a9ea6937aa";
-
-        ESP_LOGI(TAG, "[TASK] Final stream URL: %s", music_url.c_str());
-
-        cJSON_Delete(response_json);
-
-        {
-            std::lock_guard<std::mutex> lock(self->info_mutex_);
-            self->current_music_url_ = std::move(music_url);
-        }
-
-        ESP_LOGI(TAG, "[TASK] Starting stream: %s - %s",
-            self->current_song_name_.c_str(), self->current_artist_name_.c_str());
     }
-
-    self->MusicTaskLoop();
-
-exit_task:
-    ESP_LOGI(TAG, "Music task exiting");
 
     // 通知 Application 重新连接
     Application::GetInstance().Schedule([self]() {
@@ -544,7 +604,15 @@ void Esp32Music::MusicTaskLoop() {
             http->SetHeader("User-Agent", "ESP32-Music-Player/1.0");
             http->SetHeader("Accept", "*/*");
             http->SetHeader("Referer", "http://shybot.top/");
-            http->SetHeader("Range", "bytes=0-");
+            // 续播时从上次中断位置继续（循环内保存，全部重定向后才清零）
+            if (resume_offset_ > 0) {
+                char range_hdr[64];
+                snprintf(range_hdr, sizeof(range_hdr), "bytes=%u-", (unsigned)resume_offset_);
+                http->SetHeader("Range", range_hdr);
+                ESP_LOGI(TAG, "[STREAM] Resuming from offset %u", (unsigned)resume_offset_);
+            } else {
+                http->SetHeader("Range", "bytes=0-");
+            }
             add_auth_headers(http.get());
 
             {
@@ -618,6 +686,9 @@ void Esp32Music::MusicTaskLoop() {
             }
 #endif
 
+            // 续播偏移已消费（所有重定向完成，正式开始流式读取）
+            resume_offset_ = 0;
+
             // ---- 流式读取 + 解码 + 播放 ----
             size_t buf_pos = 0;
             bool first_frame = true;
@@ -630,9 +701,11 @@ void Esp32Music::MusicTaskLoop() {
             static constexpr int kSpeedLogIntervalS = 5;
 #endif
 
+            bool need_more = false;  // 解码器 underflow 后强制读
             while (!stop_requested_.load()) {
                 // 先尽量从HTTP读取数据填满缓冲区
-                if (buf_pos < kMp3ReadBufSize / 4) {
+                if (buf_pos < kMp3ReadBufSize / 4 || need_more) {
+                    need_more = false;
                     int bytes_read = http->Read(
                         reinterpret_cast<char*>(mp3_read_buf_.data() + buf_pos),
                         kMp3ReadBufSize - buf_pos);
@@ -666,6 +739,7 @@ void Esp32Music::MusicTaskLoop() {
 
                     total_body_bytes += bytes_read;
                     buf_pos += bytes_read;
+                    streamed_bytes_.store((size_t)total_body_bytes, std::memory_order_relaxed);
 
 #ifdef MUSIC_STREAM_DEBUG
                     bytes_since_last_log += bytes_read;
@@ -727,7 +801,6 @@ void Esp32Music::MusicTaskLoop() {
                     }
                     // 继续循环，尽量多解码几帧再读HTTP
                 } else if (decode_result == ERR_MP3_INDATA_UNDERFLOW) {
-                    // 数据不足，不延迟，立即回循环顶部读HTTP
                     if (buf_pos >= kMp3ReadBufSize - 1024) {
                         // 缓冲区已满但没有完整帧，跳过一些数据找同步字
                         int sync = MP3FindSyncWord(mp3_read_buf_.data(), static_cast<int>(buf_pos));
@@ -737,8 +810,10 @@ void Esp32Music::MusicTaskLoop() {
                         } else {
                             buf_pos = 0;
                         }
+                    } else {
+                        // 数据不足但缓冲区未满 → 强制下一轮读 HTTP
+                        need_more = true;
                     }
-                    // buf_pos < threshold，继续读HTTP
                 } else {
                     static int decode_err_cnt = 0;
                     int sync_offset = -1;
