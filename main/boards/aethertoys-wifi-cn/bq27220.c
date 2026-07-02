@@ -30,8 +30,9 @@ static const char *TAG = "bq27220";
     if (timeout == 0) { \
         ESP_LOGE(TAG, "Timeout"); \
         ret = false; \
+    } else { \
+        ret = true; \
     } \
-    ret = true; \
 } while(0)
 
 #define PRINT_ERROR(err) \
@@ -52,12 +53,12 @@ static esp_err_t bq_i2c_write(bq27220_data_t *bq_data, uint8_t reg, const uint8_
     if (len > 0 && data != NULL) {
         memcpy(buf + 1, data, len);
     }
-    return i2c_master_transmit(bq_data->i2c_dev_handle, buf, len + 1, -1);
+    return i2c_master_transmit(bq_data->i2c_dev_handle, buf, len + 1, pdMS_TO_TICKS(500));
 }
 
 static esp_err_t bq_i2c_read(bq27220_data_t *bq_data, uint8_t reg, uint8_t *data, size_t len)
 {
-    return i2c_master_transmit_receive(bq_data->i2c_dev_handle, &reg, 1, data, len, -1);
+    return i2c_master_transmit_receive(bq_data->i2c_dev_handle, &reg, 1, data, len, pdMS_TO_TICKS(500));
 }
 
 // ----
@@ -216,9 +217,9 @@ bq27220_handle_t bq27220_create(const bq27220_config_t *config)
         ESP_LOGE(TAG, "Memory allocation failed");
         return NULL;
     }
-    // 先 probe 确认设备存在
-    esp_err_t probe_err = i2c_master_probe(config->i2c_bus, BQ27220_I2C_ADDRESS, -1);
-    ESP_GOTO_ON_FALSE(probe_err == ESP_OK, 0, err, TAG, "BQ27220 not found at 0x%02X", BQ27220_I2C_ADDRESS);
+    // 先 probe 确认设备存在 (100ms 超时，未焊接也不阻塞启动)
+    esp_err_t probe_err = i2c_master_probe(config->i2c_bus, BQ27220_I2C_ADDRESS, pdMS_TO_TICKS(100));
+    ESP_GOTO_ON_FALSE(probe_err == ESP_OK, 0, err, TAG, "BQ27220 not found at 0x%02X (not soldered?)", BQ27220_I2C_ADDRESS);
 
     // 创建设备句柄
     i2c_device_config_t dev_cfg = {

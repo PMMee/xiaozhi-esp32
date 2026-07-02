@@ -796,6 +796,7 @@ private:
             return;
         }
 
+        ESP_LOGI("BQ27220", "Probing BQ27220 on I2C...");
         bq27220_config_t bq27220_cfg = {
             .i2c_bus = codec_i2c_bus_,
             .cfg = &default_config,
@@ -807,7 +808,7 @@ private:
         if (bq27220) {
             ESP_LOGI("BQ27220", "BQ27220 initialized successfully");
         } else {
-            ESP_LOGE("BQ27220", "BQ27220 initialization failed");
+            ESP_LOGE("BQ27220", "BQ27220 initialization failed (chip not responding?)");
         }
     }
 
