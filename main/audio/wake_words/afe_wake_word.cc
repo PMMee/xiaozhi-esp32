@@ -13,11 +13,16 @@ AfeWakeWord::AfeWakeWord()
       wake_word_opus_() {
 
     event_group_ = xEventGroupCreate();
+    encode_done_sem_ = xSemaphoreCreateBinary();
 }
 
 AfeWakeWord::~AfeWakeWord() {
     if (afe_data_ != nullptr) {
         afe_iface_->destroy(afe_data_);
+    }
+
+    if (encode_done_sem_ != nullptr) {
+        vSemaphoreDelete(encode_done_sem_);
     }
 
     if (wake_word_encode_task_stack_ != nullptr) {
@@ -170,6 +175,14 @@ void AfeWakeWord::StoreWakeWordData(const int16_t* data, size_t samples) {
 }
 
 void AfeWakeWord::EncodeWakeWordData() {
+    // 等待上一次编码任务完成（Semaphore 阻塞，不占 CPU）
+    if (encoding_in_progress_.load()) {
+        if (xSemaphoreTake(encode_done_sem_, pdMS_TO_TICKS(500)) != pdTRUE) {
+            ESP_LOGW(TAG, "Previous encode still running after 500ms, forcing restart");
+        }
+    }
+    encoding_in_progress_.store(true);
+
     const size_t stack_size = 4096 * 6;
     wake_word_opus_.clear();
     if (wake_word_encode_task_stack_ == nullptr) {
@@ -194,6 +207,8 @@ void AfeWakeWord::EncodeWakeWordData() {
                 std::lock_guard<std::mutex> lock(this_->wake_word_mutex_);
                 this_->wake_word_opus_.push_back(std::vector<uint8_t>());
                 this_->wake_word_cv_.notify_all();
+                this_->encoding_in_progress_.store(false);
+                xSemaphoreGive(this_->encode_done_sem_);
                 return;
             }
             
@@ -248,6 +263,8 @@ void AfeWakeWord::EncodeWakeWordData() {
             this_->wake_word_opus_.push_back(std::vector<uint8_t>());
             this_->wake_word_cv_.notify_all();
         }
+        this_->encoding_in_progress_.store(false);
+        xSemaphoreGive(this_->encode_done_sem_);
         vTaskDelete(NULL);
     }, "encode_wake_word", stack_size, this, 2, wake_word_encode_task_stack_, wake_word_encode_task_buffer_);
 }
