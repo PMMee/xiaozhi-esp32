@@ -105,4 +105,7 @@
 // A MCP Test: Control a lamp
 #define RGB_GPIO GPIO_NUM_15
 
+// 关机控制（持续拉高 GPIO13 触发硬件关机）
+#define SHUTDOWN_GPIO           GPIO_NUM_13
+
 #endif // _BOARD_CONFIG_H_

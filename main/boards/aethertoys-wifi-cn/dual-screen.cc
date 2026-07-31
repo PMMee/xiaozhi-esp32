@@ -337,47 +337,48 @@ private:
 
     void RegisterLocalMcpTools() {
         auto& mcp_server = McpServer::GetInstance();
-        auto network_switch_callback = [this](const PropertyList& properties) -> ReturnValue {
-            std::string target = properties["target"].value<std::string>();
-            NetworkType desired_type = GetNetworkType();
 
-            if (target == "toggle") {
-                desired_type = GetNetworkType() == NetworkType::WIFI ? NetworkType::ML307 : NetworkType::WIFI;
-            } else if (target == "wifi") {
-                desired_type = NetworkType::WIFI;
-            } else if (target == "4g" || target == "ml307") {
-                desired_type = NetworkType::ML307;
-            } else {
-                return std::string("{\"ok\":false,\"message\":\"invalid target, use wifi, 4g, ml307 or toggle\"}");
-            }
+        // auto network_switch_callback = [this](const PropertyList& properties) -> ReturnValue {
+        //     std::string target = properties["target"].value<std::string>();
+        //     NetworkType desired_type = GetNetworkType();
 
-            if (!CanSwitchNetworkInCurrentState()) {
-                return std::string("{\"ok\":false,\"message\":\"device cannot switch network in the current state\"}");
-            }
+        //     if (target == "toggle") {
+        //         desired_type = GetNetworkType() == NetworkType::WIFI ? NetworkType::ML307 : NetworkType::WIFI;
+        //     } else if (target == "wifi") {
+        //         desired_type = NetworkType::WIFI;
+        //     } else if (target == "4g" || target == "ml307") {
+        //         desired_type = NetworkType::ML307;
+        //     } else {
+        //         return std::string("{\"ok\":false,\"message\":\"invalid target, use wifi, 4g, ml307 or toggle\"}");
+        //     }
 
-            if (desired_type == GetNetworkType()) {
-                return std::string("{\"ok\":true,\"message\":\"already on target network\",\"network\":\"") +
-                    GetNetworkTypeName(desired_type) + "\"}";
-            }
+        //     if (!CanSwitchNetworkInCurrentState()) {
+        //         return std::string("{\"ok\":false,\"message\":\"device cannot switch network in the current state\"}");
+        //     }
 
-            RequestNetworkSwitch(desired_type, "mcp");
-            return std::string("{\"ok\":true,\"message\":\"switching network\",\"target\":\"") +
-                GetNetworkTypeName(desired_type) + "\"}";
-        };
+        //     if (desired_type == GetNetworkType()) {
+        //         return std::string("{\"ok\":true,\"message\":\"already on target network\",\"network\":\"") +
+        //             GetNetworkTypeName(desired_type) + "\"}";
+        //     }
 
-        mcp_server.AddTool("self.network.switch_net_mode",
-            "Switch active network on Aethertoys-wifi-CN. Use target=wifi, 4g, ml307 or toggle. The device will reboot after switching.",
-            PropertyList({
-                Property("target", kPropertyTypeString, std::string("toggle"))
-            }),
-            network_switch_callback);
+        //     RequestNetworkSwitch(desired_type, "mcp");
+        //     return std::string("{\"ok\":true,\"message\":\"switching network\",\"target\":\"") +
+        //         GetNetworkTypeName(desired_type) + "\"}";
+        // };
 
-        mcp_server.AddUserOnlyTool("self.network.switch",
-            "Switch active network on Aethertoys-wifi-CN. Use target=wifi, 4g, ml307 or toggle. The device will reboot after switching.",
-            PropertyList({
-                Property("target", kPropertyTypeString, std::string("toggle"))
-            }),
-            network_switch_callback);
+        // mcp_server.AddTool("self.network.switch_net_mode",
+        //     "Switch active network on Aethertoys-wifi-CN. Use target=wifi, 4g, ml307 or toggle. The device will reboot after switching.",
+        //     PropertyList({
+        //         Property("target", kPropertyTypeString, std::string("toggle"))
+        //     }),
+        //     network_switch_callback);
+
+        // mcp_server.AddUserOnlyTool("self.network.switch",
+        //     "Switch active network on Aethertoys-wifi-CN. Use target=wifi, 4g, ml307 or toggle. The device will reboot after switching.",
+        //     PropertyList({
+        //         Property("target", kPropertyTypeString, std::string("toggle"))
+        //     }),
+        //     network_switch_callback);
 
         // 添加关机 MCP 工具
         mcp_server.AddTool("self.power.shutdown", "关机",
@@ -386,7 +387,7 @@ private:
                 ESP_LOGI(TAG, "MCP tool called: self.power.shutdown (关机)");
                 if (!shutdown_gpio_initialized_.load(std::memory_order_acquire)) {
                     gpio_config_t cfg = {};
-                    cfg.pin_bit_mask = (1ULL << (uint64_t)GPIO_NUM_21);
+                    cfg.pin_bit_mask = (1ULL << (uint64_t)SHUTDOWN_GPIO);
                     cfg.mode = GPIO_MODE_OUTPUT;
                     cfg.pull_up_en = GPIO_PULLUP_DISABLE;
                     cfg.pull_down_en = GPIO_PULLDOWN_DISABLE;
@@ -398,7 +399,7 @@ private:
                     }
                     shutdown_gpio_initialized_.store(true, std::memory_order_release);
                 }
-                ESP_ERROR_CHECK(gpio_set_level(GPIO_NUM_21, 0));
+                ESP_ERROR_CHECK(gpio_set_level(SHUTDOWN_GPIO, 1));
                 return true;
             });
     }
@@ -611,18 +612,18 @@ private:
             }
 
             if (app.GetDeviceState() == kDeviceStateStarting) {
-                    auto& wifi_board = static_cast<WifiBoard&>(GetCurrentBoard());
-                    wifi_board.EnterWifiConfigMode();
+                    // 启动阶段不进入配网模式（配网通过双击触发）
+                    ESP_LOGI(TAG, "Device starting, skip config mode on single click");
             }
             // 恢复背光
             RestoreBacklightFromSettings();
             app.WakeWordInvoke(Lang::Strings::HELLO_MY_FRIEND);
         });
-        boot_button_.OnMultipleClick([this]() {
-            ESP_LOGI(TAG, "Boot button 4-click, request network switch");
-            auto target_type = GetNetworkType() == NetworkType::WIFI ? NetworkType::ML307 : NetworkType::WIFI;
-            RequestNetworkSwitch(target_type, "button_4click");
-        }, 4);
+        // boot_button_.OnMultipleClick([this]() {
+        //     ESP_LOGI(TAG, "Boot button 4-click, request network switch");
+        //     auto target_type = GetNetworkType() == NetworkType::WIFI ? NetworkType::ML307 : NetworkType::WIFI;
+        //     RequestNetworkSwitch(target_type, "button_4click");
+        // }, 4);
         boot_button_.OnDoubleClick([this]() {
             auto& app = Application::GetInstance();
             ESP_LOGI(TAG, "Boot button double click, state=%d", app.GetDeviceState());
