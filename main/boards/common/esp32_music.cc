@@ -145,6 +145,7 @@ bool Esp32Music::Start(const std::string& song_name, const std::string& artist_n
     end_reason_ = EndReason::Normal;
     resume_url_.clear();
     resume_offset_ = 0;
+    decoded_offset_.store(0);  // 新歌从头播放，清空帧边界断点
     resume_song_name_.clear();
     resume_artist_name_.clear();
     current_music_url_.clear();
@@ -183,13 +184,15 @@ bool Esp32Music::Start(const std::string& song_name, const std::string& artist_n
 void Esp32Music::Pause() {
     if (!playing_.load()) return;
 
-    ESP_LOGI(TAG, "Pausing music (resume at offset %u)", (unsigned)streamed_bytes_.load());
+    // 用"已解码到帧边界"的精确断点（方案B），避免从 MP3 帧中间续播导致解码失败
+    size_t frame_boundary = decoded_offset_.load();
+    ESP_LOGI(TAG, "Pausing music (resume at frame offset %u)", (unsigned)frame_boundary);
     stop_requested_.store(true);
     end_reason_ = EndReason::Stopped;
 
     // 保存续播状态
     resume_url_ = current_music_url_;
-    resume_offset_ = streamed_bytes_.load();
+    resume_offset_ = frame_boundary;
     {
         std::lock_guard<std::mutex> lock(info_mutex_);
         resume_song_name_ = current_song_name_;
@@ -686,6 +689,8 @@ void Esp32Music::MusicTaskLoop() {
             }
 #endif
 
+            // 本次 HTTP 流的绝对起始字节位置（续播时为 Range 起点，从头播放为 0）
+            size_t stream_base_offset = resume_offset_;
             // 续播偏移已消费（所有重定向完成，正式开始流式读取）
             resume_offset_ = 0;
 
@@ -799,6 +804,12 @@ void Esp32Music::MusicTaskLoop() {
                     } else if (consumed >= static_cast<int>(buf_pos)) {
                         buf_pos = 0;
                     }
+
+                    // 记录已解码到帧边界的绝对字节位置（方案B：精确续播断点）。
+                    // total_body_bytes - buf_pos = 已离开缓冲区的净字节数 = 下一帧精确起点
+                    decoded_offset_.store(
+                        stream_base_offset + (size_t)total_body_bytes - (size_t)buf_pos,
+                        std::memory_order_relaxed);
                     // 继续循环，尽量多解码几帧再读HTTP
                 } else if (decode_result == ERR_MP3_INDATA_UNDERFLOW) {
                     if (buf_pos >= kMp3ReadBufSize - 1024) {

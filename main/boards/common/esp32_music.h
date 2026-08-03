@@ -112,6 +112,8 @@ private:
 
     // 流式下载进度（供暂停续播使用）
     std::atomic<size_t> streamed_bytes_{0};
+    // 已成功解码到帧边界的绝对字节位置（方案B：精确续播断点）
+    std::atomic<size_t> decoded_offset_{0};
 
     // 搜索任务并发保护
     std::atomic<bool> search_task_running_{false};
