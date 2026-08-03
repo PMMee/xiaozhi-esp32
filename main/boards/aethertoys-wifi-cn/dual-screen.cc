@@ -625,6 +625,12 @@ private:
         boot_button_.OnDoubleClick([this]() {
             auto& app = Application::GetInstance();
             ESP_LOGI(TAG, "Boot button double click, state=%d", app.GetDeviceState());
+            // 配网模式：双击重启设备
+            if (app.GetDeviceState() == kDeviceStateWifiConfiguring) {
+                ESP_LOGI(TAG, "In WiFi config mode, rebooting...");
+                app.Reboot();
+                return;
+            }
             if (GetNetworkType() == NetworkType::WIFI) {
                 if (app.GetDeviceState() == kDeviceStateIdle || app.GetDeviceState() == kDeviceStateStarting || app.GetDeviceState() == kDeviceStateActivating) {
                     auto& wifi_board = static_cast<WifiBoard&>(GetCurrentBoard());
