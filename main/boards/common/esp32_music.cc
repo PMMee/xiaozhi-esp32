@@ -607,12 +607,22 @@ void Esp32Music::MusicTaskLoop() {
             http->SetHeader("User-Agent", "ESP32-Music-Player/1.0");
             http->SetHeader("Accept", "*/*");
             http->SetHeader("Referer", "http://shybot.top/");
-            // 续播时从上次中断位置继续（循环内保存，全部重定向后才清零）
+            // 计算本次 HTTP 流的 Range 起点。
+            // 续播时回看 4KB（pre-roll），容忍 ID3 标签 / 帧对齐误差，
+            // 让解码器在回看区内自行重新扫描到真正的帧边界，避免从帧中间续播。
+            size_t stream_base_offset = 0;
             if (resume_offset_ > 0) {
+                static const size_t kPreRollBytes = 4096;
+                stream_base_offset = (resume_offset_ > kPreRollBytes)
+                                         ? (resume_offset_ - kPreRollBytes)
+                                         : 0;
                 char range_hdr[64];
-                snprintf(range_hdr, sizeof(range_hdr), "bytes=%u-", (unsigned)resume_offset_);
+                snprintf(range_hdr, sizeof(range_hdr), "bytes=%u-",
+                         (unsigned)stream_base_offset);
                 http->SetHeader("Range", range_hdr);
-                ESP_LOGI(TAG, "[STREAM] Resuming from offset %u", (unsigned)resume_offset_);
+                ESP_LOGI(TAG, "[STREAM] Resuming from offset %u (range from %u, pre-roll %u)",
+                         (unsigned)resume_offset_, (unsigned)stream_base_offset,
+                         (unsigned)(resume_offset_ - stream_base_offset));
             } else {
                 http->SetHeader("Range", "bytes=0-");
             }
@@ -689,8 +699,6 @@ void Esp32Music::MusicTaskLoop() {
             }
 #endif
 
-            // 本次 HTTP 流的绝对起始字节位置（续播时为 Range 起点，从头播放为 0）
-            size_t stream_base_offset = resume_offset_;
             // 续播偏移已消费（所有重定向完成，正式开始流式读取）
             resume_offset_ = 0;
 
@@ -835,11 +843,19 @@ void Esp32Music::MusicTaskLoop() {
                         ESP_LOGW(TAG, "[STREAM] MP3Decode err=%d buf=%d sync=%d",
                                  decode_result, (int)buf_pos, sync_offset);
                     }
+                    // 关键：每次出错必须至少推进 1 字节，否则 sync_offset==0 时
+                    // memmove(buf, buf+0) + buf_pos-=0 什么都不做 → 无限循环死锁
                     if (buf_pos > 4) {
-                        if (sync_offset >= 0) {
+                        if (sync_offset > 0) {
                             memmove(mp3_read_buf_.data(), mp3_read_buf_.data() + sync_offset,
                                     buf_pos - sync_offset);
                             buf_pos -= sync_offset;
+                        } else if (sync_offset == 0) {
+                            // buf[0] 被误判为帧同步字（实际是垃圾/残缺帧头），
+                            // 强制跳过 1 字节，让解码器重新扫描真正有效的同步字
+                            memmove(mp3_read_buf_.data(), mp3_read_buf_.data() + 1,
+                                    buf_pos - 1);
+                            --buf_pos;
                         } else {
                             buf_pos = 0;
                         }
